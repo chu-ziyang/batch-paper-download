@@ -81,15 +81,30 @@ def load_config():
     except yaml.YAMLError as e:
         sys.exit(f"[!!] config.yaml 格式错误: {e}")
 
+    if cfg is None:
+        sys.exit("[!!] config.yaml 为空，请填入配置后重新运行")
+
     # 校验必填字段
     required = ["browser", "school", "auth"]
     missing = [k for k in required if k not in cfg]
     if missing:
         sys.exit(f"[!!] config.yaml 缺少必填字段: {', '.join(missing)}")
 
-    method = cfg["auth"].get("method", "vpn")
+    # 校验 auth 为 dict 类型
+    auth_cfg = cfg.get("auth", {})
+    if not isinstance(auth_cfg, dict):
+        sys.exit("[!!] config.yaml 中 auth 应为字典格式，不能是字符串。\n"
+                 "  正确: auth:\n    method: vpn\n  错误: auth: vpn")
+
+    method = auth_cfg.get("method", "vpn")
     if method not in ("vpn", "carsi"):
         sys.exit(f"[!!] auth.method 必须是 vpn 或 carsi，当前: {method}")
+
+    # 校验 VPN 模式必填子字段
+    if method == "vpn":
+        vpn_cfg = auth_cfg.get("vpn", {})
+        if not vpn_cfg.get("url"):
+            sys.exit("[!!] VPN 模式下 auth.vpn.url 不能为空，请在 config.yaml 中填写学校 VPN 地址")
 
     return cfg
 
@@ -369,17 +384,24 @@ def carsi_authenticate(sid, pub_key):
         return False
 
     school_name = config["school"].get("english_name", "")
+    if not school_name:
+        print(f"  [!!] school.english_name 为空，请在 config.yaml 中填写学校英文名")
+        return False
     carsi_timeout = config["auth"]["carsi"].get("timeout", 300)
 
     print(f"  [->] CARSI 认证: {pub['name']}")
 
-    # Step 1: 导航到机构登录入口
+    # Step 1: 导航到机构登录入口，记录初始 URL
     entry = carsi_cfg.get("entry_url", f"https://{pub['domain']}/")
     try:
         bsk_nav(entry, sid, timeout=30)
     except Exception:
         print(f"  [i] 导航未完全加载，继续...")
     time.sleep(4)
+    try:
+        entry_url = (bsk_url(sid) or entry).lower()
+    except Exception:
+        entry_url = entry.lower()
 
     # Step 2: 执行自动化步骤（点击 / 输入）
     steps = carsi_cfg.get("steps", [])
@@ -434,7 +456,16 @@ def carsi_authenticate(sid, pub_key):
                 time.sleep(4)
 
     # Step 3: 等待用户在浏览器中完成 IdP 登录
-    print(f"  [i] 请在浏览器中完成学校 IdP 登录...")
+    # 检查自动化步骤是否生效（URL 应已离开入口页）
+    try:
+        post_steps_url = (bsk_url(sid) or "").lower()
+    except Exception:
+        post_steps_url = ""
+    if post_steps_url == entry_url:
+        print(f"  [i] 自动化步骤未能跳转，请在浏览器中手动完成机构登录")
+        print(f"  [i] （点击 Sign in → Institutional login → 选择学校）")
+
+    print(f"  [i] 等待登录完成...")
     success_cond = carsi_cfg.get("success", {})
     url_contains = success_cond.get("url_contains", pub["domain"])
     url_not = success_cond.get("url_not_contains", ["/login", "/shibboleth", "wayf.", "idp."])
@@ -445,8 +476,10 @@ def carsi_authenticate(sid, pub_key):
             url = (bsk_url(sid) or "").lower()
         except Exception:
             url = ""
+        # 必须满足：1) 在出版商域 2) 不在登录/认证中间页 3) URL 已变化
         ok = (url_contains in url and
-              not any(x in url for x in url_not))
+              not any(x in url for x in url_not) and
+              url != entry_url)
         if ok:
             _carsi_authed.add(pub_key)
             print(f"\n  [OK] {pub['name']} CARSI 认证成功")
@@ -463,14 +496,18 @@ def carsi_authenticate(sid, pub_key):
 # ═══════════════════════════════════════════════════
 
 def _is_logged_in(sid):
-    """检查 VPN 是否已登录：URL 不在 /login 路径且仍在 webvpn 域名内。"""
+    """检查 VPN 是否已登录：URL 不在 /login 路径且仍在 VPN 域名内。"""
     url = bsk_url(sid) or ""
     if not url:
         return False
     u = url.lower()
-    vpn_host = config["auth"]["vpn"]["url"].split("://")[1].split("/")[0]
-    # 提取域名核心部分（如 webvpn.hfut.edu.cn → webvpn）
-    vpn_domain_core = vpn_host.split(".")[0]
+    try:
+        vpn_url = config["auth"]["vpn"]["url"]
+        vpn_host = vpn_url.split("://")[1].split("/")[0]
+        # 提取域名核心部分（如 webvpn.hfut.edu.cn → webvpn）
+        vpn_domain_core = vpn_host.split(".")[0]
+    except (IndexError, KeyError):
+        return False
     return "/login" not in u and vpn_domain_core in u
 
 def ensure_vpn(sid, timeout=None):
