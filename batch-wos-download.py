@@ -133,10 +133,8 @@ PUBLISHERS = {
         "result_selector": 'a[href*="/pii/"]',
         # CARSI 机构登录
         "carsi_login": {
-            "entry_url": "https://www.sciencedirect.com/",
+            "entry_url": "https://www.sciencedirect.com/user/institution/login?targetURL=%2F",
             "steps": [
-                {"click": "Sign in"},
-                {"click": "your institution"},
                 {"type": "{school_name}"},
                 {"select": "{school_name}"},
             ],
@@ -364,14 +362,39 @@ def ensure_carsi(sid):
     return True
 
 
+def _dismiss_cookie_banner(sid):
+    """关闭常见的 Cookie/隐私弹窗。"""
+    js = (
+        "(function(){"
+        "var btns=document.querySelectorAll('button');"
+        "for(var i=0;i<btns.length;i++){"
+        "var t=btns[i].textContent||'';"
+        "if(t.indexOf('Accept')>-1||t.indexOf('接受')>-1"
+        "||t.indexOf('同意')>-1||t.indexOf('Allow')>-1"
+        "||t.indexOf('全部')>-1){"
+        "btns[i].click();return'clicked:'+t.slice(0,30);"
+        "}"
+        "}"
+        "return'none';"
+        "})()"
+    )
+    try:
+        r = bsk_eval(js, sid, timeout=5)
+        if r and r.startswith("clicked:"):
+            time.sleep(2)
+    except Exception:
+        pass
+
+
 def carsi_authenticate(sid, pub_key):
     """对指定出版商执行 CARSI 机构登录。
 
     流程：
     1. 导航到出版商的机构登录入口页
-    2. 尝试自动点击/输入（如 carsi_login.steps 定义）
-    3. 等待用户在浏览器中完成学校 IdP 登录
-    4. 检测 URL 回到出版商域 → 登录成功
+    2. 关闭 Cookie 弹窗
+    3. 尝试自动点击/输入（如 carsi_login.steps 定义）
+    4. 等待用户在浏览器中完成学校 IdP 登录
+    5. 检测 URL 回到出版商域 → 登录成功
     """
     global _carsi_authed
     if pub_key in _carsi_authed:
@@ -397,7 +420,10 @@ def carsi_authenticate(sid, pub_key):
         bsk_nav(entry, sid, timeout=30)
     except Exception:
         print(f"  [i] 导航未完全加载，继续...")
-    time.sleep(4)
+    time.sleep(3)
+    # 关闭可能弹出的 Cookie 弹窗
+    _dismiss_cookie_banner(sid)
+    time.sleep(1)
     try:
         entry_url = (bsk_url(sid) or entry).lower()
     except Exception:
