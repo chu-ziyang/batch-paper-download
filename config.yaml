@@ -1,0 +1,35 @@
+# ═══════════════════════════════════════════════════
+#  Batch Paper Download — 用户配置
+#  复制此文件到脚本同目录，修改后运行
+# ═══════════════════════════════════════════════════
+
+# ── 浏览器 ID（bsk browsers 查看）──
+browser: "058c7104"
+
+# ── 学校/机构信息 ──
+school:
+  name: "合肥工业大学"                           # 中文名
+  english_name: "Hefei University of Technology"  # 英文名（CARSI 搜索用）
+
+# ── 认证方式：vpn 或 carsi ──
+auth:
+  method: "vpn"       # 可选: vpn | carsi
+
+  vpn:
+    url: "https://webvpn.hfut.edu.cn/"
+    login_link: "CAS"          # VPN 首页的登录入口链接文本
+    timeout: 300               # 等待手动登录超时（秒）
+
+  carsi:
+    timeout: 300               # 等待手动登录超时（秒）
+
+# ── 已知 VPN 编码前缀（可选，加速启动，不填则自动探测）──
+vpn_prefixes:
+  # elsevier: "https://webvpn.hfut.edu.cn/https/77726476706e69737468656265737421e7e056d234336155700b8ca891472636a6d29e640e"
+  # acs: "https://webvpn.hfut.edu.cn/https/77726476706e69737468656265737421e0e2438f69316b4330079bab"
+  # springer: "https://webvpn.hfut.edu.cn/https/77726476706e69737468656265737421fcfe4f976923784277068ea98a1b203a54"
+  # wiley: "https://webvpn.hfut.edu.cn/https/77726476706e69737468656265737421fff94d95293564597c1a88be811b343cb55cc5e3193677"
+
+# ── 下载设置 ──
+download:
+  output_dir: "./downloads"

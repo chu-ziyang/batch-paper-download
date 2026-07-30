@@ -1,0 +1,11 @@
+# === 多出版商测试 ===
+# Elsevier DOI
+10.1016/j.chemosphere.2024.141264
+# ACS DOI
+acs: 10.1021/acs.est.3c01379
+# Springer DOI
+springer: 10.1007/s11356-025-36116-w
+# Wiley DOI
+wiley: 10.1002/etc.5621
+# 精确标题搜索 (Elsevier)
+"Catalytic activity of different iron oxides in heterogeneous Fenton-like systems"
