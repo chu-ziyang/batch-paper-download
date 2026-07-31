@@ -86,8 +86,35 @@ class TestDetectPublisher(unittest.TestCase):
     def test_tandf(self):
         self.assertEqual(bd.detect_publisher("10.1080/x"), "tandf")
 
-    def test_unknown_defaults_elsevier(self):
-        self.assertEqual(bd.detect_publisher("10.9999/unknown"), "elsevier")
+    def test_unknown_prefix_returns_none(self):
+        # 未知前缀不再静默回退 elsevier，由 resolve_publisher 用 CrossRef 兜底
+        self.assertIsNone(bd.detect_publisher("10.9999/unknown"))
+
+
+class TestPublisherNameToKey(unittest.TestCase):
+    def test_elsevier(self):
+        self.assertEqual(bd.publisher_name_to_key("Elsevier BV"), "elsevier")
+
+    def test_springer(self):
+        self.assertEqual(bd.publisher_name_to_key("Springer Science and Business Media LLC"), "springer")
+
+    def test_acs(self):
+        self.assertEqual(bd.publisher_name_to_key("American Chemical Society (ACS)"), "acs")
+
+    def test_wiley(self):
+        self.assertEqual(bd.publisher_name_to_key("Wiley"), "wiley")
+
+    def test_rsc(self):
+        self.assertEqual(bd.publisher_name_to_key("Royal Society of Chemistry (RSC)"), "rsc")
+
+    def test_tandf(self):
+        self.assertEqual(bd.publisher_name_to_key("Informa UK Limited"), "tandf")
+
+    def test_unknown(self):
+        self.assertIsNone(bd.publisher_name_to_key("Some Unknown Publisher"))
+
+    def test_none_input(self):
+        self.assertIsNone(bd.publisher_name_to_key(None))
 
 
 class TestIsValidPdf(unittest.TestCase):
@@ -223,6 +250,61 @@ class TestPdfServerPipeline(unittest.TestCase):
         # 文件应落到 tmpdir 下的 evil.pdf，而非上级目录
         self.assertTrue((Path(self.tmpdir) / "evil.pdf").exists())
         self.assertFalse((Path(self.tmpdir).parent.parent.parent / "etc" / "evil.pdf").exists())
+
+
+class TestPdfServerTokenAuth(unittest.TestCase):
+    """token 鉴权：设置 PDF_SERVER_TOKEN 后必须携带正确 token 才能写入。"""
+    PORT = "20000"  # 避开默认 9999 和集成测试的 19999
+    TOKEN = "test-secret-token"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftoken_")
+        env = dict(os.environ, PDF_SERVER_PORT=cls.PORT, PDF_SERVER_TOKEN=cls.TOKEN)
+        cls.proc = subprocess.Popen(
+            [sys.executable, str(HERE / "pdf_server.py"), cls.tmpdir],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        cls._wait_ready()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        try:
+            cls.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            cls.proc.kill()
+
+    @classmethod
+    def _wait_ready(cls):
+        url = f"http://127.0.0.1:{cls.PORT}/"
+        for _ in range(50):
+            time.sleep(0.1)
+            try:
+                urllib.request.urlopen(url, timeout=0.5)
+            except urllib.error.HTTPError:
+                return
+            except Exception:
+                continue
+        raise RuntimeError("pdf_server 未在 5s 内就绪")
+
+    def _post(self, fname, data, token=None):
+        url = f"http://127.0.0.1:{self.PORT}/{urllib.parse.quote(fname)}"
+        headers = {"X-Auth-Token": token} if token else {}
+        req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.read()
+
+    def test_without_token_rejected(self):
+        data = b"%PDF-1.4\n" + b"\x00" * 60000
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._post("no_token.pdf", data)
+        self.assertEqual(ctx.exception.code, 403)
+        self.assertFalse((Path(self.tmpdir) / "no_token.pdf").exists())
+
+    def test_with_token_accepted(self):
+        data = b"%PDF-1.4\n" + b"\x00" * 60000
+        self.assertEqual(self._post("with_token.pdf", data, token=self.TOKEN), b"OK")
+        self.assertTrue((Path(self.tmpdir) / "with_token.pdf").exists())
 
 
 if __name__ == "__main__":

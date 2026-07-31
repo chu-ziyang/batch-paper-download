@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-batch-download.py — 批量下载论文 PDF（多出版商，VPN 直达模式）
+batch-wos-download.py — 批量下载论文 PDF（多出版商，VPN/CARSI 模式）
 
 用法:
-    py batch-download.py input.txt ./downloads
+    py batch-wos-download.py input.txt ./downloads
 
 input.txt 格式:
     # ---- DOI 模式（以 10. 开头，自动识别出版商）----
@@ -26,7 +26,7 @@ input.txt 格式:
     springer (Springer Link)    wiley (Wiley Online Library)
 """
 
-import subprocess, json, base64, sys, os, time, urllib.parse, re
+import subprocess, json, base64, sys, os, time, urllib.parse, re, hashlib, secrets, socket
 from pathlib import Path
 
 # ── YAML 配置（如未安装 pyyaml，运行: pip install pyyaml）──
@@ -65,6 +65,7 @@ vpn_prefixes: {}                  # 可选，已知 VPN 前缀（加速启动）
 
 download:
   output_dir: "./downloads"
+  skip_existing: true          # 已存在有效 PDF 时跳过
 """
 
 def load_config():
@@ -111,6 +112,12 @@ def load_config():
 config = load_config()
 BROWSER = config["browser"]
 
+# 已存在有效 PDF 时跳过（可由 config.yaml download.skip_existing 关闭）
+SKIP_EXISTING = bool(config.get("download", {}).get("skip_existing", True))
+
+# PDF 加速服务器状态（HTTP 模式，main 中启动，失败自动回退 base64 模式）
+PDF_SERVER = {"port": None, "token": None, "proc": None}
+
 # ═══════════════════════════════════════════════════
 #  出版商定义
 # ═══════════════════════════════════════════════════
@@ -118,7 +125,6 @@ BROWSER = config["browser"]
 DOI_PREFIX_MAP = {
     "10.1016/": "elsevier", "10.1007/": "springer", "10.1002/": "wiley",
     "10.1021/": "acs",     "10.1039/": "rsc",      "10.1080/": "tandf",
-    "10.1109/": "ieee",    "10.1038/": "nature",   "10.1093/": "oup",
 }
 
 PUBLISHERS = {
@@ -276,8 +282,9 @@ def bsk_eval(js, sid, timeout=60):
                 f"--timeout={timeout}s", timeout=timeout + 15)
 
 def bsk_nav(url, sid, timeout=60):
+    # bsk 的 --timeout 接受 30s/1m/1500ms 格式，统一用秒（与 bsk_eval 一致）
     return _bsk("navigate", url, "--session", sid,
-                "--wait-until", "domcontentloaded", f"--timeout={timeout*1000}")
+                "--wait-until", "domcontentloaded", f"--timeout={timeout}s")
 
 def bsk_url(sid):
     return _bsk("evaluate", "window.location.href", "--session", sid, "--quiet", timeout=30)
@@ -313,9 +320,8 @@ def find_ref(snap, text, tag=None):
 
 def start_session():
     print("[*] 启动浏览器会话...")
-    # 清理旧会话
-    _bsk("session", "stop", "--all", "--quiet")
-    time.sleep(2)
+    # 不清理其它会话，避免误杀用户正在运行的其它自动化任务
+    time.sleep(1)
     for _ in range(3):
         # 不用 --json（bsk --json 输出含中文引号，解析不可靠），直接读纯文本 session_id
         raw = _bsk("session", "start", "--browser", BROWSER)
@@ -453,8 +459,14 @@ def carsi_authenticate(sid, pub_key):
                 "'input[type=\"text\"],input[type=\"search\"],input:not([type])');"
                 "for(var i=0;i<ins.length;i++){"
                 "if(ins[i].offsetParent!==null){"
-                "ins[i].value=" + json.dumps(type_text) + ";"
+                "ins[i].focus();"
+                "var setter=Object.getOwnPropertyDescriptor("
+                "window.HTMLInputElement.prototype,'value').set;"
+                "if(setter){setter.call(ins[i]," + json.dumps(type_text) + ");}"
+                "else{ins[i].value=" + json.dumps(type_text) + ";}"
                 "ins[i].dispatchEvent(new Event('input',{bubbles:true}));"
+                "ins[i].dispatchEvent(new Event('keydown',{bubbles:true,key:'Enter'}));"
+                "ins[i].dispatchEvent(new Event('keyup',{bubbles:true,key:'Enter'}));"
                 "ins[i].dispatchEvent(new Event('change',{bubbles:true}));"
                 "return ins[i].name||ins[i].id||'ok';"
                 "}"
@@ -681,17 +693,18 @@ def _search_publisher(sid, pub_key, query, exact=True):
 # ═══════════════════════════════════════════════════
 
 def detect_publisher(doi):
+    """按 DOI 前缀识别出版商；无法识别返回 None（不再静默回退 elsevier）。"""
     for prefix, pk in sorted(DOI_PREFIX_MAP.items(), key=lambda x: -len(x[0])):
         if doi.startswith(prefix):
             return pk
-    return "elsevier"
+    return None
 
 def doi_to_pii(doi):
     """用 CrossRef API 查 DOI → 返回 (publisher_key, PII)。"""
     import urllib.request
     try:
         req = urllib.request.Request(
-            f"https://api.crossref.org/works/{doi}",
+            f"https://api.crossref.org/works/{urllib.parse.quote(doi, safe='')}",
             headers={"User-Agent": "batch-download/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             msg = json.loads(resp.read())["message"]
@@ -705,12 +718,51 @@ def doi_to_pii(doi):
         print(f"  [i] CrossRef 查询失败: {e}")
         return detect_publisher(doi), None
 
+
+# CrossRef publisher 字段 → 本脚本支持的出版商 key
+PUBLISHER_NAME_KEYWORDS = [
+    ("elsevier", "elsevier"),
+    ("springer", "springer"),
+    ("wiley", "wiley"),
+    ("american chemical society", "acs"),
+    ("royal society of chemistry", "rsc"),
+    ("taylor & francis", "tandf"),
+    ("informa uk", "tandf"),   # T&F 在 CrossRef 的注册名
+]
+
+
+def publisher_name_to_key(name):
+    """把 CrossRef 的 publisher 字段映射到本脚本的出版商 key，未知返回 None。"""
+    n = (name or "").lower()
+    for kw, key in PUBLISHER_NAME_KEYWORDS:
+        if kw in n:
+            return key
+    return None
+
+
+def resolve_publisher(doi):
+    """DOI → 出版商 key：前缀识别 → CrossRef 兜底 → None（无法识别）。"""
+    pk = detect_publisher(doi)
+    if pk:
+        return pk
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"https://api.crossref.org/works/{urllib.parse.quote(doi, safe='')}",
+            headers={"User-Agent": "batch-download/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            msg = json.loads(resp.read())["message"]
+        return publisher_name_to_key(msg.get("publisher"))
+    except Exception as e:
+        print(f"  [i] CrossRef 出版商查询失败: {e}")
+        return None
+
 # ═══════════════════════════════════════════════════
-#  PDF 下载（分块 base64 传输，magic 校验）
+#  PDF 下载（HTTP 优先 / base64 回退，magic 校验）
 # ═══════════════════════════════════════════════════
 
 PDF_MAGIC = b'%PDF-'          # PDF 文件头
-MIN_PDF_SIZE = 50000          # 小于此值视为损坏（错误页/空包）
+MIN_PDF_SIZE = 2048           # 小于此值视为损坏（错误页/空包）；2KB 已足以区分合法短文献
 
 def _is_valid_pdf(path):
     """判断文件是否为有效 PDF：>=MIN_PDF_SIZE 且以 %PDF- 开头。"""
@@ -726,51 +778,93 @@ def _is_valid_pdf(path):
 BASE64_CHUNK = 1048576   # 每轮 bsk_eval 传输 1MB（nature-downloader 同款）
 CHUNK_TIMEOUT = 60       # 单块超时（秒）
 
-def download_pdf(sid, out_path, pdf_url=None, eval_timeout=90):
-    """下载 PDF：浏览器 fetch → 分块 base64 传输 → Python 逐块写盘。
 
-    借鉴 nature-downloader 的分块策略（pdf-utils.mjs）：
-    1. fetch PDF → Uint8Array 存入 window 变量
-    2. 多轮 bsk_eval 逐块 btoa 回传（每块 1MB）
-    3. Python 逐块 base64 解码写盘
-    避免了单次巨型 base64 字符串导致的超时、内存压力和传输失败。
+def start_pdf_server(out_dir):
+    """启动本地 PDF 接收服务器（HTTP 模式，带随机 token 鉴权）。
+
+    失败（端口占用/环境异常）时返回 None，主流程自动回退 base64 模式。
     """
-    time.sleep(3)
-    target_js = json.dumps(pdf_url) if pdf_url else "window.location.href"
+    global PDF_SERVER
+    if PDF_SERVER["port"]:
+        return PDF_SERVER["port"], PDF_SERVER["token"]
+    try:
+        import urllib.request
+        # 随机空闲端口，避免与其它服务冲突
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        token = secrets.token_hex(16)
+        env = dict(os.environ, PDF_SERVER_PORT=str(port), PDF_SERVER_TOKEN=token)
+        proc = subprocess.Popen(
+            [sys.executable, str(Path(__file__).parent / "pdf_server.py"), str(out_dir)],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 等待就绪（GET 返回 501 即视为已监听）
+        for _ in range(50):
+            time.sleep(0.1)
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=0.5)
+            except urllib.error.HTTPError:
+                break
+            except Exception:
+                continue
+        else:
+            proc.terminate()
+            raise RuntimeError("server not ready")
+        PDF_SERVER.update(port=port, token=token, proc=proc)
+        print(f"  [i] PDF 加速服务器: http://127.0.0.1:{port}（HTTP 模式，带 token 鉴权）")
+        return port, token
+    except Exception as e:
+        print(f"  [i] 启动 PDF 服务器失败，将使用 base64 模式: {e}")
+        return None
 
-    # ── Step 1: fetch PDF → window.__pdf_buf，校验 %PDF- head ──
-    fetch_js = (
+
+def stop_pdf_server():
+    """结束 PDF 服务器子进程。"""
+    proc = PDF_SERVER.get("proc")
+    if proc:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def _download_pdf_http(sid, out_path, total_size):
+    """HTTP 模式：浏览器把 window.__pdf_buf 一次性 POST 到本地 pdf_server。"""
+    port = PDF_SERVER["port"]
+    token = PDF_SERVER["token"]
+    url = f"http://127.0.0.1:{port}/{urllib.parse.quote(out_path.name)}"
+    js = (
         "(async()=>{try{"
-        "const r=await fetch(" + target_js + ",{credentials:'include',redirect:'follow'});"
-        "if(!r.ok)return'ERR:HTTP '+r.status;"
-        "const ab=await r.arrayBuffer();"
-        "const u=new Uint8Array(ab);"
-        "let m='';for(let i=0;i<5&&i<u.length;i++)m+=String.fromCharCode(u[i]);"
-        "if(m!=='%PDF-')return'NOTPDF:'+(r.headers.get('content-type')||'');"
-        "window.__pdf_buf=u;"
-        "return'OK:'+u.length;"
+        "const r=await fetch(" + json.dumps(url) + ",{method:'POST',"
+        "headers:{'Content-Type':'application/octet-stream',"
+        "'X-Auth-Token':" + json.dumps(token) + "},"
+        "body:window.__pdf_buf});"
+        "const t=await r.text();"
+        "return r.status+':'+t;"
         "}catch(e){return'ERR:'+e.message;}})()"
     )
-    r = bsk_eval(fetch_js, sid, timeout=eval_timeout)
-    if not r:
-        print("  [!] PDF fetch 失败（无响应）")
+    r = bsk_eval(js, sid, timeout=120)
+    if not r or not r.startswith("200:"):
+        print(f"  [!] HTTP 模式失败: {(r or '无响应')[:100]}")
         return False
-    if r.startswith("ERR:HTTP"):
-        print(f"  [!] fetch 返回 HTTP 错误: {r[9:]}")
-        return False
-    if r.startswith("NOTPDF:"):
-        print(f"  [!] 非 PDF 内容: {r[8:]}")
-        return False
-    if not r.startswith("OK:"):
-        print(f"  [!] PDF fetch 异常: {r[:80]}")
-        return False
+    try:
+        if _is_valid_pdf(out_path) and out_path.stat().st_size == total_size:
+            print(f"  [OK] {out_path.name} ({total_size/1048576:.1f} MB, HTTP)")
+            return True
+    except OSError:
+        pass
+    print("  [!] HTTP 落盘校验失败")
+    return False
 
-    total_size = int(r.split(":")[1])
+
+def _download_pdf_base64(sid, out_path, total_size):
+    """base64 分块模式：逐块 btoa 回传 → Python 写盘（兼容性兜底）。"""
     total_mb = total_size / 1048576
     total_chunks = (total_size + BASE64_CHUNK - 1) // BASE64_CHUNK
-    print(f"  [i] PDF {total_mb:.1f} MB, {total_chunks} 块传输中...")
-
-    # ── Step 2: 分块 base64 传输 → 逐块写盘 ──
     tmp_path = out_path.with_name(out_path.name + ".tmp")
     try:
         with open(tmp_path, 'wb') as f:
@@ -815,33 +909,97 @@ def download_pdf(sid, out_path, pdf_url=None, eval_timeout=90):
         print(f"\n  [!!] 写入失败: {e}")
         return False
     finally:
-        # 清理 window 变量（best-effort）
-        try:
-            bsk_eval("delete window.__pdf_buf", sid, timeout=10)
-        except Exception:
-            pass
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
             except OSError:
                 pass
 
+
+def download_pdf(sid, out_path, pdf_url=None, eval_timeout=90):
+    """下载 PDF：浏览器 fetch → HTTP POST 本地服务器（优先）→ base64 分块回退。
+
+    借鉴 nature-downloader 的分块策略（pdf-utils.mjs）：
+    1. fetch PDF → Uint8Array 存入 window 变量
+    2a. HTTP 模式：二进制 POST 到本地 pdf_server（快；带 token 鉴权）
+    2b. base64 模式：多轮 bsk_eval 逐块 btoa 回传（每块 1MB），Python 解码写盘
+    避免了单次巨型 base64 字符串导致的超时、内存压力和传输失败。
+    """
+    time.sleep(3)
+    target_js = json.dumps(pdf_url) if pdf_url else "window.location.href"
+
+    # ── Step 1: fetch PDF → window.__pdf_buf，校验 %PDF- head ──
+    fetch_js = (
+        "(async()=>{try{"
+        "const r=await fetch(" + target_js + ",{credentials:'include',redirect:'follow'});"
+        "if(!r.ok)return'ERR:HTTP '+r.status;"
+        "const ab=await r.arrayBuffer();"
+        "const u=new Uint8Array(ab);"
+        "let m='';for(let i=0;i<5&&i<u.length;i++)m+=String.fromCharCode(u[i]);"
+        "if(m!=='%PDF-')return'NOTPDF:'+(r.headers.get('content-type')||'');"
+        "window.__pdf_buf=u;"
+        "return'OK:'+u.length;"
+        "}catch(e){return'ERR:'+e.message;}})()"
+    )
+    r = bsk_eval(fetch_js, sid, timeout=eval_timeout)
+    if not r:
+        print("  [!] PDF fetch 失败（无响应）")
+        return False
+    if r.startswith("ERR:HTTP"):
+        print(f"  [!] fetch 返回 HTTP 错误: {r[9:]}")
+        return False
+    if r.startswith("NOTPDF:"):
+        print(f"  [!] 非 PDF 内容: {r[8:]}")
+        return False
+    if not r.startswith("OK:"):
+        print(f"  [!] PDF fetch 异常: {r[:80]}")
+        return False
+
+    total_size = int(r.split(":")[1])
+    print(f"  [i] PDF {total_size/1048576:.1f} MB")
+
+    try:
+        # ── Step 2a: HTTP 模式（二进制 POST 本地服务器，快；失败自动回退）──
+        if PDF_SERVER["port"] and _download_pdf_http(sid, out_path, total_size):
+            return True
+        print("  [i] HTTP 模式不可用或失败，回退 base64 分块模式...")
+
+        # ── Step 2b: 分块 base64 传输 → 逐块写盘 ──
+        return _download_pdf_base64(sid, out_path, total_size)
+    finally:
+        # 清理 window 变量（best-effort）
+        try:
+            bsk_eval("delete window.__pdf_buf", sid, timeout=10)
+        except Exception:
+            pass
+
 # ═══════════════════════════════════════════════════
 #  单篇处理核心
 # ═══════════════════════════════════════════════════
 
 def process_one(sid, typ, query, pub_override, out_dir):
-    safe = re.sub(r'[\\/:*?"<>|]+', '_', query)[:80]
+    raw_safe = re.sub(r'[\\/:*?"<>|]+', '_', query)
+    # 截断可能导致不同论文同名互相覆盖：超长时附加短哈希保证唯一
+    if len(raw_safe) > 80:
+        safe = raw_safe[:80] + "-" + hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
+    else:
+        safe = raw_safe
     res = {"query": query, "status": "fail"}
 
     try:
-        pub_key = pub_override or (detect_publisher(query) if typ == "doi" else "elsevier")
+        pub_key = pub_override or (resolve_publisher(query) if typ == "doi" else "elsevier")
+        if not pub_key:
+            print("  [!!] 无法识别 DOI 的出版商（暂不支持该前缀），可手动指定: "
+                  "elsevier: / acs: / springer: / wiley: / rsc: / tandf:")
+            res["status"] = "fail"
+            res["error"] = "Unknown publisher"
+            return res
         pub = PUBLISHERS.get(pub_key, PUBLISHERS["elsevier"])
         print(f"  [i] 出版商: {pub['name']}")
 
-        # 跳过已下载（>50KB 的 PDF 视为有效）
+        # 跳过已下载（有效 PDF 视为已存在；可用 config download.skip_existing 关闭）
         out_path = out_dir / f"{safe}.pdf"
-        if _is_valid_pdf(out_path):
+        if SKIP_EXISTING and _is_valid_pdf(out_path):
             print(f"  [OK] 已存在 ({out_path.stat().st_size/1024/1024:.1f} MB)，跳过")
             res["status"] = "ok"
             res["file"] = str(out_path)
@@ -1041,12 +1199,22 @@ def parse_input(lines):
 # ═══════════════════════════════════════════════════
 
 def main():
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
 
     inp = Path(sys.argv[1])
-    out = Path(sys.argv[2])
+    # 输出目录：命令行参数优先，缺省用 config.yaml 的 download.output_dir
+    if len(sys.argv) >= 3:
+        out = Path(sys.argv[2])
+    else:
+        out = Path(config.get("download", {}).get("output_dir", "./downloads"))
+        print(f"[i] 未指定输出目录，使用 config.yaml 的 download.output_dir: {out}")
+
+    if not inp.exists():
+        print(f"[!!] 输入文件不存在: {inp}")
+        sys.exit(1)
+
     out.mkdir(parents=True, exist_ok=True)
 
     entries = parse_input(inp.read_text(encoding="utf-8").splitlines())
@@ -1069,6 +1237,9 @@ def main():
         if not ensure_auth(sid):
             return
 
+        # 启动本地 PDF 加速服务器（HTTP 模式；失败自动回退 base64）
+        start_pdf_server(out)
+
         ok = 0
         for idx, (typ, query, pub) in enumerate(entries, 1):
             print(f"\n{'─'*50}")
@@ -1076,9 +1247,16 @@ def main():
             print(f"[{idx}/{len(entries)}] {label}  {query[:80]}")
             print(f"{'─'*50}")
 
-            res = process_one(sid, typ, query, pub, out)
+            res = None
+            for attempt in range(3):
+                res = process_one(sid, typ, query, pub, out)
+                if res and res["status"] == "ok":
+                    break
+                if attempt < 2:
+                    print(f"  [i] 失败，3 秒后重试（还剩 {2 - attempt} 次）...")
+                    time.sleep(3)
             log["results"].append(res)
-            if res["status"] == "ok":
+            if res and res["status"] == "ok":
                 ok += 1
             time.sleep(2)
 
@@ -1098,6 +1276,7 @@ def main():
         log["ended"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         (out / "_log.json").write_text(
             json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+        stop_pdf_server()
         stop_session(sid)
 
 if __name__ == "__main__":

@@ -33,3 +33,4 @@ vpn_prefixes:
 # ── 下载设置 ──
 download:
   output_dir: "./downloads"
+  skip_existing: true          # 已存在有效 PDF 时跳过

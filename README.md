@@ -21,6 +21,9 @@
 ## 快速体验（30 秒）
 
 ```bash
+# 0. 安装依赖（只需一次）
+pip install -r requirements.txt
+
 # 1. 首次运行：自动生成 config.yaml 模板
 py batch-wos-download.py
 # → 编辑 config.yaml，填入学校信息和认证方式
@@ -94,7 +97,7 @@ auth:
   method: "carsi"
 ```
 
-详见 [SKILL.md](skills/SKILL.md) 或 `.claude/skills/batch-paper-download/SKILL.md`。
+详见 `docs/` 目录下的设计与实现文档。
 
 ### 账号要求
 
@@ -395,7 +398,8 @@ py batch-wos-download.py papers_to_download.txt ./papers
 ```
 batch-wos-download.py    # 主脚本
 config.yaml              # 用户配置（浏览器 ID、学校、VPN/CARSI）
-pdf_server.py            # HTTP 加速服务器（不需要改）
+pdf_server.py            # HTTP 加速服务器（不需要改，自动启动/停止）
+requirements.txt         # Python 依赖（pyyaml）
 ```
 
 ---
@@ -424,9 +428,9 @@ VPN cookie 有效期内自动登录，过期需要手动输入验证码。脚本
 
 ### 3. Chrome 阻止程序化下载
 
-`a.click()` 在无用户手势时被 Chrome 拦截。解决方案：
-- **HTTP 模式**：浏览器 `fetch PDF → POST 到 localhost:9999`（二进制传输，快）
-- **base64 模式**：`fetch PDF → btoa → subprocess stdout → Python 解码`（文本传输，慢但兼容）
+`a.click()` 在无用户手势时被 Chrome 拦截。解决方案（脚本自动选择，无需干预）：
+- **HTTP 模式（默认优先）**：浏览器 `fetch PDF → POST 到本地 pdf_server`（二进制传输，快；带随机 token 鉴权，防止陌生网页向本机写文件）
+- **base64 模式（自动回退）**：`fetch PDF → btoa → subprocess stdout → Python 解码`（文本传输，慢但兼容；HTTP 模式不可用时使用）
 
 ### 4. bsk snapshot --json 不可靠
 
@@ -486,10 +490,11 @@ PDF fetch + base64 编码对 10MB+ 文件需要 60-120 秒。默认 timeout 需�
 ├── 📜 batch-wos-download.py   ← 主脚本
 ├── 📜 config.yaml             ← 用户配置
 ├── 📜 pdf_server.py           ← HTTP 加速服务器（自动启动）
-├── 📜 test_all.py             ← 单元测试（30 个）
+├── 📜 test_all.py             ← 单元测试（40 个）
 ├── 📋 papers_to_download.txt  ← 输入文件
 ├── 📖 README.md              ← 本教程
 └── 📂 papers_download/       ← 输出目录
     ├── 📄 *.pdf
     └── 📋 _log.json
 ```
+
