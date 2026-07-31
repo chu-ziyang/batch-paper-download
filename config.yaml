@@ -24,7 +24,7 @@ auth:
     timeout: 300               # 等待手动登录超时（秒）
 
 # ── 已知 VPN 编码前缀（可选，加速启动，不填则自动探测）──
-vpn_prefixes:
+vpn_prefixes: {}
   # elsevier: "https://webvpn.hfut.edu.cn/https/77726476706e69737468656265737421e7e056d234336155700b8ca891472636a6d29e640e"
   # acs: "https://webvpn.hfut.edu.cn/https/77726476706e69737468656265737421e0e2438f69316b4330079bab"
   # springer: "https://webvpn.hfut.edu.cn/https/77726476706e69737468656265737421fcfe4f976923784277068ea98a1b203a54"

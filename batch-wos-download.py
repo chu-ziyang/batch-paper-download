@@ -601,7 +601,8 @@ def get_vpn_prefix(sid, pub_key):
         return vpn_cache[pub_key]
 
     # 快速通道：从 config.yaml 读取已知前缀
-    vpn_prefixes = config.get("vpn_prefixes", {})
+    # 注意：vpn_prefixes 只有注释时会解析为 None，需兜底为空字典
+    vpn_prefixes = config.get("vpn_prefixes") or {}
     if pub_key in vpn_prefixes and vpn_prefixes[pub_key]:
         vpn_cache[pub_key] = vpn_prefixes[pub_key]
         return vpn_prefixes[pub_key]
@@ -619,16 +620,19 @@ def get_vpn_prefix(sid, pub_key):
         return None
 
     _bsk("click", ref, "--session", sid)
+    vpn_host = vpn_url.rstrip("/").split("://")[1]
     for _ in range(15):
         time.sleep(2)
         url = bsk_url(sid)
-        if url and pub["domain"].split(".")[0] in url:
-            vpn_host = vpn_url.rstrip("/").split("://")[1]
-            m = re.search(rf'(https://{re.escape(vpn_host)}/https/[0-9a-f]+)/', url)
+        # WebVPN 会把目标域名编码成 hex，URL 中不再出现原始域名，
+        # 因此改为检测 VPN 代理跳转（vpn_host + /https/）并提取 hex 前缀
+        if url and vpn_host in url and "/https/" in url:
+            m = re.search(rf'https://{re.escape(vpn_host)}/https/([0-9a-fA-F]+)', url)
             if m:
-                vpn_cache[pub_key] = m.group(1)
-                print(f"  [OK] {pub['name']}: {m.group(1)[:50]}...")
-                return m.group(1)
+                prefix = f"https://{vpn_host}/https/{m.group(1)}/"
+                vpn_cache[pub_key] = prefix
+                print(f"  [OK] {pub['name']}: {prefix[:50]}...")
+                return prefix
     print(f"  [!!] {pub['name']} 连接失败，请检查 VPN 是否正常")
     return None
 
@@ -711,7 +715,9 @@ def doi_to_pii(doi):
         pk = detect_publisher(doi)
         pii = None
         for alt in msg.get("alternative-id", []):
-            if alt.startswith("S") and len(alt) == 16:
+            # Elsevier PII 格式：S + 16 位数字（共 17 字符），
+            # 旧代码 len==16 会漏掉正确 PII（如 S0045653524001577）
+            if alt.startswith("S") and len(alt) >= 16 and alt[1:].isdigit():
                 pii = alt; break
         return pk, pii
     except Exception as e:
@@ -738,6 +744,11 @@ def publisher_name_to_key(name):
         if kw in n:
             return key
     return None
+
+
+def _urlencode_doi(doi):
+    """DOI 用于 URL 路径时统一编码（先解码防止重复编码）。"""
+    return urllib.parse.quote(urllib.parse.unquote(doi), safe='')
 
 
 def resolve_publisher(doi):
@@ -926,20 +937,33 @@ def download_pdf(sid, out_path, pdf_url=None, eval_timeout=90):
     避免了单次巨型 base64 字符串导致的超时、内存压力和传输失败。
     """
     time.sleep(3)
-    target_js = json.dumps(pdf_url) if pdf_url else "window.location.href"
+    # fetch 目标：优先 pdf_url；失败时回退到 window.location.href。
+    # WebVPN 会把编码 URL 规范化（如 %2F → /），直接 fetch 构造的 URL 可能 400，
+    # 而页面当前地址（location.href）通常可正常下载（Springer/Wiley 实测）。
+    if pdf_url:
+        targets_js = "[" + json.dumps(pdf_url) + ",window.location.href]"
+    else:
+        targets_js = "[window.location.href]"
 
     # ── Step 1: fetch PDF → window.__pdf_buf，校验 %PDF- head ──
     fetch_js = (
-        "(async()=>{try{"
-        "const r=await fetch(" + target_js + ",{credentials:'include',redirect:'follow'});"
-        "if(!r.ok)return'ERR:HTTP '+r.status;"
+        "(async()=>{"
+        "const targets=" + targets_js + ";"
+        "let lastErr='ERR:NO-TARGET';"
+        "for(let i=0;i<targets.length;i++){"
+        "try{"
+        "const r=await fetch(targets[i],{credentials:'include',redirect:'follow'});"
+        "if(!r.ok){lastErr='ERR:HTTP '+r.status;continue;}"
         "const ab=await r.arrayBuffer();"
         "const u=new Uint8Array(ab);"
-        "let m='';for(let i=0;i<5&&i<u.length;i++)m+=String.fromCharCode(u[i]);"
-        "if(m!=='%PDF-')return'NOTPDF:'+(r.headers.get('content-type')||'');"
+        "let m='';for(let j=0;j<5&&j<u.length;j++)m+=String.fromCharCode(u[j]);"
+        "if(m!=='%PDF-'){lastErr='NOTPDF:'+(r.headers.get('content-type')||'');continue;}"
         "window.__pdf_buf=u;"
         "return'OK:'+u.length;"
-        "}catch(e){return'ERR:'+e.message;}})()"
+        "}catch(e){lastErr='ERR:'+e.message;}"
+        "}"
+        "return lastErr;"
+        "})()"
     )
     r = bsk_eval(fetch_js, sid, timeout=eval_timeout)
     if not r:
@@ -1093,8 +1117,9 @@ def _handle_doi(sid, query, pub_key, pub, prefix):
     doi_enc = urllib.parse.quote(query, safe='')
 
     # 有 pdf_from_doi 配置的出版商：直接构造 PDF URL
+    # （DOI 需 URL 编码，否则 Springer/Wiley 的 /content/pdf/ 路径会 400）
     if "pdf_from_doi" in pub:
-        path = pub["pdf_from_doi"].format(doi=query, pii="")
+        path = pub["pdf_from_doi"].format(doi=doi_enc, pii="")
         return f"{prefix}{path}"
 
     # Elsevier：需要 PII → /pdfft
@@ -1146,7 +1171,7 @@ def _handle_search(sid, query, pub_key, pub, prefix, exact=True):
     doi_regex = pub.get("doi_regex", r'/doi/([^/?]+)')
     m = re.search(doi_regex, article_url)
     if m and "pdf_from_doi" in pub:
-        return f"{prefix}{pub['pdf_from_doi'].format(doi=m.group(1), pii='')}"
+        return f"{prefix}{pub['pdf_from_doi'].format(doi=_urlencode_doi(m.group(1)), pii='')}"
     if m and "pdf_from_pii" in pub:
         return f"{prefix}{pub['pdf_from_pii'].format(pii=m.group(1), doi='')}"
 
@@ -1253,8 +1278,9 @@ def main():
                 if res and res["status"] == "ok":
                     break
                 if attempt < 2:
-                    print(f"  [i] 失败，3 秒后重试（还剩 {2 - attempt} 次）...")
-                    time.sleep(3)
+                    wait = 5 if attempt == 0 else 15
+                    print(f"  [i] 失败，{wait} 秒后重试（还剩 {2 - attempt} 次）...")
+                    time.sleep(wait)
             log["results"].append(res)
             if res and res["status"] == "ok":
                 ok += 1

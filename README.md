@@ -436,15 +436,16 @@ VPN cookie 有效期内自动登录，过期需要手动输入验证码。脚本
 
 `bsk snapshot --json` 输出中文引号导致 JSON 解析崩溃。解决方案：不用 `--json`，直接解析纯文本 snapshot 的 `@eN role "name"` 行格式。
 
-### 5. VPN 编码前缀在新标签 vs 同页跳转
+### 5. VPN 编码前缀：WebVPN 会把域名编码成 hex
 
-点击 VPN 主页的出版商链接有时开新标签，有时同页跳转。脚本的 `get_vpn_prefix` 同时处理两种情况：
-- 首选 `config.yaml` 中配置的 `vpn_prefixes`（已验证可用）
-- 回退自动探测（点击链接 → 检测 URL 变化）
+点击 VPN 主页的出版商链接后，URL 形如 `https://webvpn.xxx.edu.cn/https/77726476706e69.../`——目标域名（如 sciencedirect）**不会出现在 URL 中**，而是被编码成 hex。脚本的 `get_vpn_prefix` 处理方式：
+- 首选 `config.yaml` 中配置的 `vpn_prefixes`（已验证可用，最快）
+- 回退自动探测：点击链接后检测 URL 是否出现 `vpn_host + /https/`（代理跳转标志），从 hex 重建前缀
+- ⚠️ `config.yaml` 里 `vpn_prefixes:` 后面如果只有注释（没有值），YAML 会解析为 `None`，脚本已做兜底（`or {}`）
 
 ### 6. ScienceDirect pdfft URL 需要 PII
 
-Elsevier 的 PDF 链接格式是 `/science/article/pii/{PII}/pdfft`。`PII` 是一个 16 位字符（如 `S0045653524001577`），不能直接从 DOI 推导。获取方式：
+Elsevier 的 PDF 链接格式是 `/science/article/pii/{PII}/pdfft`。`PII` 是 S + 16 位数字（共 17 字符，如 `S0045653524001577`），不能直接从 DOI 推导。获取方式：
 1. CrossRef API → `alternative-id` 字段
 2. 回退：ScienceDirect 搜索 DOI → 从结果 URL 提取 PII
 
@@ -455,6 +456,13 @@ PDF fetch + base64 编码对 10MB+ 文件需要 60-120 秒。默认 timeout 需�
 ### 8. 标题搜索加引号命中率最高
 
 在 ScienceDirect 搜索时，用 `"exact title phrase"` 比分词搜索命中率高得多。脚本的精确搜索模式自动给标题加引号。精确搜索无结果时自动回退关键词搜索。
+
+### 9. 连续批量下载可能触发出版商反爬（403/400）
+
+短时间内反复请求时，ScienceDirect 会返回 403 页（"There was a problem providing the content you requested" + reference number），Springer 可能间歇性 400。这是**服务端限流**，不是脚本 bug：
+- 脚本对单篇失败自动重试 2 次（间隔 5s / 15s 退避）
+- 若整批被拦，建议暂停 30-60 分钟再跑，或适当放慢速度
+- Springer/Wiley 的 PDF 路径需要 DOI URL 编码（%2F）；fetch 构造 URL 失败时会自动回退到 `window.location.href`（WebVPN 规范化后的 URL，实测可下载）
 
 ---
 
