@@ -21,6 +21,33 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 
+# ── 测试与仓库 config.yaml 解耦 ──
+# 导入主模块前用 BPD_CONFIG 指向临时 fixture 配置，
+# 测试套件不依赖仓库中是否提交了 config.yaml。
+TEST_CONFIG_YAML = """\
+browser: "test-browser-123"
+school:
+  name: "测试大学"
+  english_name: "Test University"
+auth:
+  method: "vpn"
+  vpn:
+    url: "https://webvpn.test.edu.cn/"
+    login_link: "CAS"
+    timeout: 300
+  carsi:
+    timeout: 300
+    probe: ""
+download:
+  output_dir: "./downloads"
+  skip_existing: true
+"""
+
+_FIXTURE_DIR = tempfile.mkdtemp(prefix="bpd_fixture_")
+_FIXTURE_CONFIG = Path(_FIXTURE_DIR) / "config.yaml"
+_FIXTURE_CONFIG.write_text(TEST_CONFIG_YAML, encoding="utf-8")
+os.environ["BPD_CONFIG"] = str(_FIXTURE_CONFIG)
+
 _spec = importlib.util.spec_from_file_location("bd", HERE / "batch-wos-download.py")
 bd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bd)
@@ -251,6 +278,60 @@ class TestValidateConfig(unittest.TestCase):
     def test_vpn_mode_allows_minimal_school(self):
         cfg = self._vpn_cfg(school={})
         self.assertIsNone(bd.validate_config(cfg))
+
+
+class TestConfigPathOverride(unittest.TestCase):
+    """BPD_CONFIG 环境变量：测试可用临时配置，不依赖仓库 config.yaml。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="bpd_cfgtest_")
+        self.old_env = os.environ.get("BPD_CONFIG")
+        self._counter = 0
+
+    def tearDown(self):
+        if self.old_env is None:
+            os.environ.pop("BPD_CONFIG", None)
+        else:
+            os.environ["BPD_CONFIG"] = self.old_env
+
+    def _fresh(self, config_path):
+        """用指定配置路径重新执行主模块（模拟新进程加载）。"""
+        self._counter += 1
+        os.environ["BPD_CONFIG"] = str(config_path)
+        spec = importlib.util.spec_from_file_location(
+            f"bd_fresh_{self._counter}", HERE / "batch-wos-download.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_env_override_used(self):
+        cfg = Path(self.tmpdir) / "config.yaml"
+        cfg.write_text(TEST_CONFIG_YAML, encoding="utf-8")
+        mod = self._fresh(cfg)
+        self.assertEqual(mod.config["browser"], "test-browser-123")
+
+    def test_missing_config_generates_template_and_exits(self):
+        missing = Path(self.tmpdir) / "nope.yaml"
+        with self.assertRaises(SystemExit):
+            self._fresh(missing)
+        self.assertTrue(missing.exists())
+        # 生成的模板应能通过自身校验
+        self.assertIsNone(bd.validate_config(bd.yaml.safe_load(
+            missing.read_text(encoding="utf-8"))))
+
+    def test_invalid_yaml_reports_error(self):
+        bad = Path(self.tmpdir) / "bad.yaml"
+        bad.write_text("auth: [unclosed\n", encoding="utf-8")
+        with self.assertRaises(SystemExit) as ctx:
+            self._fresh(bad)
+        self.assertIn("格式错误", str(ctx.exception))
+
+    def test_invalid_structure_reports_error(self):
+        bad = Path(self.tmpdir) / "bad2.yaml"
+        bad.write_text("auth: vpn\n", encoding="utf-8")
+        with self.assertRaises(SystemExit) as ctx:
+            self._fresh(bad)
+        self.assertIn("配置错误", str(ctx.exception))
 
 
 class TestFindRefAny(unittest.TestCase):

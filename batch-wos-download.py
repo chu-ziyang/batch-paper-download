@@ -39,7 +39,9 @@ except ImportError:
 #  配置加载
 # ═══════════════════════════════════════════════════
 
-CONFIG_PATH = Path(__file__).parent / "config.yaml"
+# 配置路径：默认脚本同目录 config.yaml，可用 BPD_CONFIG 环境变量覆盖
+# （测试、多学校配置切换、CI 场景使用）
+CONFIG_PATH = Path(os.environ.get("BPD_CONFIG") or (Path(__file__).parent / "config.yaml"))
 CONFIG_TEMPLATE = """\
 # ═══════════════════════════════════════════════════
 #  Batch Paper Download — 用户配置
