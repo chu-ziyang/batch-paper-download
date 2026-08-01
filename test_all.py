@@ -572,6 +572,41 @@ class TestIdpConsentHint(unittest.TestCase):
         self.assertIsNone(bd.idp_consent_hint(""))
 
 
+class TestRequestHelpResult(unittest.TestCase):
+    """bsk request-help 返回值解析（定位"面板未弹出但脚本继续"的问题）。"""
+
+    def test_continued_not_retry(self):
+        self.assertFalse(bd.request_help_needs_retry("tab=123 outcome=continued"))
+
+    def test_timeout_outcome_not_retry(self):
+        self.assertFalse(bd.request_help_needs_retry("tab=123 outcome=timeout"))
+
+    def test_err_prefix_needs_retry(self):
+        self.assertTrue(bd.request_help_needs_retry(
+            "ERR:bsk:error: unexpected argument 'test prompt' found"))
+
+    def test_empty_needs_retry(self):
+        self.assertTrue(bd.request_help_needs_retry(""))
+
+    def test_none_needs_retry(self):
+        self.assertTrue(bd.request_help_needs_retry(None))
+
+    def test_outcome_continued(self):
+        self.assertEqual(bd.request_help_outcome("tab=1 outcome=continued"), "continued")
+
+    def test_outcome_timeout(self):
+        self.assertEqual(bd.request_help_outcome("tab=1 outcome=timeout"), "timeout")
+
+    def test_outcome_error(self):
+        self.assertEqual(bd.request_help_outcome("ERR:bsk:boom"), "error")
+
+    def test_outcome_empty_is_error(self):
+        self.assertEqual(bd.request_help_outcome(""), "error")
+
+    def test_outcome_unknown(self):
+        self.assertEqual(bd.request_help_outcome("weird output"), "unknown")
+
+
 class TestPdfServerPipeline(unittest.TestCase):
     """集成测试：pdf_server 落盘 + _is_valid_pdf 校验配合。
 

@@ -29,6 +29,13 @@ input.txt 格式:
 import subprocess, json, base64, sys, os, time, urllib.parse, re, hashlib, secrets, socket
 from pathlib import Path
 
+# Windows 控制台/管道统一 UTF-8 输出（避免中文在 GBK 终端乱码）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # ── YAML 配置（如未安装 pyyaml，运行: pip install pyyaml）──
 try:
     import yaml
@@ -333,6 +340,57 @@ def bsk_json(*args, timeout=30):
     raw = _bsk(*args, "--json", timeout=timeout)
     try: return json.loads(raw) if raw else None
     except: return None
+
+
+# ═══════════════════════════════════════════════════
+#  request-help（请求人工完成登录/验证码）
+# ═══════════════════════════════════════════════════
+
+def request_help_needs_retry(result):
+    """request-help 返回值是否需要重试：ERR 前缀或空输出（纯函数）。"""
+    return not result or result.startswith("ERR:bsk:")
+
+
+def request_help_outcome(result):
+    """解析 request-help 结果：continued / timeout / error / unknown（纯函数）。"""
+    m = re.search(r"outcome=(\w+)", result or "")
+    if m:
+        return m.group(1)
+    if not result or result.startswith("ERR:bsk:"):
+        return "error"
+    return "unknown"
+
+
+def request_human_help(sid, prompt, title, timeout_sec, attempts=2):
+    """调用 bsk request-help 请求人工完成登录/验证码，失败自动重试。
+
+    实测踩坑：prompt 必须用 --prompt 标志传参（位置传参会报
+    "unexpected argument" 且不弹面板，脚本却静默继续）；
+    返回值以 ERR:bsk: 开头时同样需要告警并重试。
+    """
+    for i in range(attempts):
+        try:
+            r = _bsk("request-help", "--session", sid, "--title", title,
+                     "--prompt", prompt, "--timeout", f"{timeout_sec}s",
+                     timeout=timeout_sec + 30)
+        except Exception as e:
+            print(f"  [i] request-help 调用异常: {e}")
+            r = ""
+        if request_help_needs_retry(r):
+            print(f"  [!] request-help 未成功（{r or '无输出'}）")
+            if i < attempts - 1:
+                print("  [i] 3 秒后重试...")
+                time.sleep(3)
+            continue
+        outcome = request_help_outcome(r)
+        if outcome == "continued":
+            print("  [i] 人工确认完成（继续）")
+        elif outcome == "timeout":
+            print(f"  [i] request-help 等待超时（{timeout_sec}s），继续检测登录状态...")
+        return r
+    print("  [i] request-help 多次失败，改用轮询检测登录状态...")
+    return None
+
 
 # ═══════════════════════════════════════════════════
 #  snapshot 解析
@@ -675,20 +733,14 @@ def carsi_authenticate(sid, pub_key):
     print(f"  [i] 等待登录完成...")
     # 用 request-help 暂停自动化，请用户在浏览器中完成机构登录
     # （实测：停会话会关闭标签页，保持会话 + 辅助面板才是正确交互方式）
-    try:
-        print(f"  [!] 将弹出辅助面板，请在浏览器中完成 {pub['name']} 机构登录"
-              f"（选择学校 → 账号/密码/验证码），完成后点「继续」", flush=True)
-        _bsk("request-help",
-             f"请在浏览器中完成 {pub['name']} 的机构登录：\n"
-             "1) 如未自动跳转到学校登录页，请先选择学校\n"
-             "2) 输入账号、密码和验证码\n"
-             "3) 认证完成后应自动回到出版商页面\n"
-             "完成后点击「继续」",
-             "--session", sid, "--title", f"{pub['name']} 机构登录",
-             "--timeout", f"{carsi_timeout}s",
-             timeout=carsi_timeout + 30)
-    except Exception as e:
-        print(f"  [i] request-help 不可用（{e}），请手动完成登录，脚本将轮询检测...")
+    print(f"  [!] 将弹出辅助面板，请在浏览器中完成 {pub['name']} 机构登录"
+          f"（选择学校 → 账号/密码/验证码），完成后点「继续」", flush=True)
+    prompt = (f"请在浏览器中完成 {pub['name']} 的机构登录：\n"
+              "1) 如未自动跳转到学校登录页，请先选择学校\n"
+              "2) 输入账号、密码和验证码\n"
+              "3) 认证完成后应自动回到出版商页面\n"
+              "完成后点击「继续」")
+    request_human_help(sid, prompt, f"{pub['name']} 机构登录", carsi_timeout)
 
     success_cond = {
         "url_contains": carsi_cfg.get("success", {}).get("url_contains", pub["domain"]),
@@ -818,18 +870,13 @@ def ensure_vpn(sid, timeout=None):
         "3) 点击「登录」进入 VPN 首页\n"
         "完成后点击「继续」"
     )
-    try:
-        _bsk("request-help", prompt, "--session", sid,
-             "--title", "VPN 登录", "--timeout", f"{timeout}s",
-             timeout=timeout + 30)
-        # 用户点击继续后，导航回 VPN 首页确认
-        bsk_nav(vpn_url, sid); time.sleep(3)
-        if _is_logged_in(sid):
-            print("\n  [OK] 检测到登录成功")
-            return sid
-        print("  [i] request-help 已结束但未检测到登录（可能未完成），继续轮询...")
-    except Exception as e:
-        print(f"  [i] request-help 不可用（{e}），改用轮询等待（保持会话）...")
+    request_human_help(sid, prompt, "VPN 登录", timeout)
+    # 用户点击继续后，导航回 VPN 首页确认
+    bsk_nav(vpn_url, sid); time.sleep(3)
+    if _is_logged_in(sid):
+        print("\n  [OK] 检测到登录成功")
+        return sid
+    print("  [i] request-help 已结束但未检测到登录（可能未完成），继续轮询...")
 
     # 回退：保持会话轮询（不停止会话，避免关闭标签页）
     deadline = time.time() + timeout
