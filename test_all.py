@@ -118,6 +118,65 @@ class TestDetectPublisher(unittest.TestCase):
         self.assertIsNone(bd.detect_publisher("10.9999/unknown"))
 
 
+class TestIsPii(unittest.TestCase):
+    """Elsevier PII 严格格式：S + 16 位数字，共 17 字符。"""
+
+    def test_17_char_valid(self):
+        self.assertTrue(bd.is_pii("S0045653524001577"))
+
+    def test_16_char_invalid(self):
+        self.assertFalse(bd.is_pii("S123456789012345"))
+
+    def test_18_char_invalid(self):
+        self.assertFalse(bd.is_pii("S123456789012345678"))
+
+    def test_non_digit_tail(self):
+        self.assertFalse(bd.is_pii("S123456789012345x"))
+
+    def test_wrong_leading_letter(self):
+        self.assertFalse(bd.is_pii("X0045653524001577"))
+
+    def test_empty(self):
+        self.assertFalse(bd.is_pii(""))
+
+
+class TestDownloadDelay(unittest.TestCase):
+    """篇间延迟：config download.delay，默认 2 秒。"""
+
+    def _set_download(self, value):
+        old = bd.config.get("download")
+        bd.config["download"] = value
+        return old
+
+    def test_default_two(self):
+        old = self._set_download({})
+        try:
+            self.assertEqual(bd.get_download_delay(), 2)
+        finally:
+            bd.config["download"] = old
+
+    def test_from_config(self):
+        old = self._set_download({"delay": 7})
+        try:
+            self.assertEqual(bd.get_download_delay(), 7)
+        finally:
+            bd.config["download"] = old
+
+    def test_zero_allowed(self):
+        old = self._set_download({"delay": 0})
+        try:
+            self.assertEqual(bd.get_download_delay(), 0)
+        finally:
+            bd.config["download"] = old
+
+    def test_bad_value_falls_back(self):
+        old = self._set_download({"delay": "abc"})
+        try:
+            self.assertEqual(bd.get_download_delay(), 2)
+        finally:
+            bd.config["download"] = old
+
+
 class TestPublisherNameToKey(unittest.TestCase):
     def test_elsevier(self):
         self.assertEqual(bd.publisher_name_to_key("Elsevier BV"), "elsevier")

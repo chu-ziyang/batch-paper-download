@@ -35,3 +35,4 @@ vpn_prefixes: {}
 download:
   output_dir: "./downloads"
   skip_existing: true          # 已存在有效 PDF 时跳过
+  delay: 2                     # 篇间等待秒数（防出版商反爬，可调大）

@@ -69,6 +69,7 @@ vpn_prefixes: {}                  # 可选，已知 VPN 前缀（加速启动）
 download:
   output_dir: "./downloads"
   skip_existing: true          # 已存在有效 PDF 时跳过
+  delay: 2                     # 篇间等待秒数（防出版商反爬，可调大）
 """
 
 
@@ -138,6 +139,15 @@ BROWSER = config["browser"]
 
 # 已存在有效 PDF 时跳过（可由 config.yaml download.skip_existing 关闭）
 SKIP_EXISTING = bool(config.get("download", {}).get("skip_existing", True))
+
+
+def get_download_delay():
+    """返回篇间延迟秒数（config download.delay，默认 2，防反爬可调大）。"""
+    try:
+        return max(0, int(config.get("download", {}).get("delay", 2)))
+    except (TypeError, ValueError):
+        return 2
+
 
 # PDF 加速服务器状态（HTTP 模式，main 中启动，失败自动回退 base64 模式）
 PDF_SERVER = {"port": None, "token": None, "proc": None}
@@ -425,7 +435,7 @@ def _dismiss_cookie_banner(sid):
     try:
         r = bsk_eval(js, sid, timeout=5)
         if r and r.startswith("clicked:"):
-            time.sleep(2)
+            time.sleep(get_download_delay())
     except Exception:
         pass
 
@@ -864,6 +874,13 @@ def detect_publisher(doi):
             return pk
     return None
 
+
+def is_pii(alt):
+    """Elsevier PII 严格格式：S + 16 位数字，共 17 字符。"""
+    return (isinstance(alt, str) and len(alt) == 17
+            and alt[0] == "S" and alt[1:].isdigit())
+
+
 def doi_to_pii(doi):
     """用 CrossRef API 查 DOI → 返回 (publisher_key, PII)。"""
     import urllib.request
@@ -876,9 +893,7 @@ def doi_to_pii(doi):
         pk = detect_publisher(doi)
         pii = None
         for alt in msg.get("alternative-id", []):
-            # Elsevier PII 格式：S + 16 位数字（共 17 字符），
-            # 旧代码 len==16 会漏掉正确 PII（如 S0045653524001577）
-            if alt.startswith("S") and len(alt) >= 16 and alt[1:].isdigit():
+            if is_pii(alt):
                 pii = alt; break
         return pk, pii
     except Exception as e:
