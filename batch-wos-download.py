@@ -629,7 +629,9 @@ def get_vpn_prefix(sid, pub_key):
         if url and vpn_host in url and "/https/" in url:
             m = re.search(rf'https://{re.escape(vpn_host)}/https/([0-9a-fA-F]+)', url)
             if m:
-                prefix = f"https://{vpn_host}/https/{m.group(1)}/"
+                # 注意：前缀不带尾部斜杠！_handle_doi/_handle_search 用
+                # f"{prefix}{path}" 拼接（path 以 / 开头），带斜杠会变 // 导致 400
+                prefix = f"https://{vpn_host}/https/{m.group(1)}"
                 vpn_cache[pub_key] = prefix
                 print(f"  [OK] {pub['name']}: {prefix[:50]}...")
                 return prefix
