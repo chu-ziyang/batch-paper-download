@@ -504,7 +504,7 @@ PDF fetch + base64 编码对 10MB+ 文件需要 60-120 秒。默认 timeout 需�
 ├── 📜 batch-wos-download.py   ← 主脚本
 ├── 📜 config.yaml             ← 用户配置
 ├── 📜 pdf_server.py           ← HTTP 加速服务器（自动启动）
-├── 📜 test_all.py             ← 单元测试（92 个）
+├── 📜 test_all.py             ← 单元测试（94 个）
 ├── 📜 SKILL.md                ← AI 代理使用说明（可安装为 skill）
 ├── 📋 papers_to_download.txt  ← 输入文件
 ├── 📖 README.md              ← 本教程

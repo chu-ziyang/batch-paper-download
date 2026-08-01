@@ -451,6 +451,7 @@ def carsi_login_done(url, success_cond, entry_url="", seen_auth_hop=False):
     if not url:
         return False
     u = url.lower()
+    u_norm = u.rstrip("/")
     cond = success_cond or {}
     url_contains = (cond.get("url_contains") or "").lower()
     url_not = [x.lower() for x in cond.get("url_not_contains", [])]
@@ -458,7 +459,7 @@ def carsi_login_done(url, success_cond, entry_url="", seen_auth_hop=False):
         return False
     if any(x in u for x in url_not):
         return False
-    if not seen_auth_hop and entry_url and u == entry_url.lower():
+    if not seen_auth_hop and entry_url and u_norm == entry_url.lower().rstrip("/"):
         return False
     return True
 
@@ -661,7 +662,8 @@ def carsi_authenticate(sid, pub_key):
             url = ""
         if url:
             cond_contains = (success_cond.get("url_contains") or "").lower()
-            if url != entry_url.lower() or (cond_contains and cond_contains not in url):
+            if (url.rstrip("/") != entry_url.lower().rstrip("/")
+                    or (cond_contains and cond_contains not in url)):
                 seen_auth_hop = True
         if carsi_login_done(url, success_cond, entry_url, seen_auth_hop):
             _carsi_authed.add(pub_key)

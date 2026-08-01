@@ -452,6 +452,14 @@ class TestCarsiLoginDone(unittest.TestCase):
         entry = "https://www.sciencedirect.com/user/institution/login?targetURL=%2F"
         self.assertFalse(bd.carsi_login_done(entry, self.COND, entry))
 
+    def test_entry_slash_normalized(self):
+        # 浏览器 URL 可能去掉尾部斜杠：应与入口等价，不能误判为已离开入口
+        entry = "https://pubs.acs.org/"
+        acs_cond = {"url_contains": "pubs.acs.org",
+                    "url_not_contains": ["/login", "/shibboleth", "wayf.", "idp."]}
+        self.assertFalse(bd.carsi_login_done(
+            "https://pubs.acs.org", acs_cond, entry))
+
     def test_home_page_entry_without_auth_hop(self):
         # 入口就是出版商首页（ACS 模式）：URL 没离开过首页 → 不能判定登录
         entry = "https://pubs.acs.org/"
