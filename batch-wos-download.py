@@ -660,6 +660,23 @@ def carsi_authenticate(sid, pub_key):
         print(f"  [i] （如: Log in / Sign in → Institutional / Find my institution → 选择学校）")
 
     print(f"  [i] 等待登录完成...")
+    # 用 request-help 暂停自动化，请用户在浏览器中完成机构登录
+    # （实测：停会话会关闭标签页，保持会话 + 辅助面板才是正确交互方式）
+    try:
+        print(f"  [!] 将弹出辅助面板，请在浏览器中完成 {pub['name']} 机构登录"
+              f"（选择学校 → 账号/密码/验证码），完成后点「继续」", flush=True)
+        _bsk("request-help",
+             f"请在浏览器中完成 {pub['name']} 的机构登录：\n"
+             "1) 如未自动跳转到学校登录页，请先选择学校\n"
+             "2) 输入账号、密码和验证码\n"
+             "3) 认证完成后应自动回到出版商页面\n"
+             "完成后点击「继续」",
+             "--session", sid, "--title", f"{pub['name']} 机构登录",
+             "--timeout", f"{carsi_timeout}s",
+             timeout=carsi_timeout + 30)
+    except Exception as e:
+        print(f"  [i] request-help 不可用（{e}），请手动完成登录，脚本将轮询检测...")
+
     success_cond = {
         "url_contains": carsi_cfg.get("success", {}).get("url_contains", pub["domain"]),
         "url_not_contains": carsi_cfg.get("success", {}).get(

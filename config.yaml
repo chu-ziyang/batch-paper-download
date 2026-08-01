@@ -13,7 +13,7 @@ school:
 
 # ── 认证方式：vpn 或 carsi ──
 auth:
-  method: "vpn"       # 可选: vpn | carsi
+  method: "carsi"     # 可选: vpn | carsi（实测：SD 拦截 WebVPN 出口 IP，CARSI 可绕开）
 
   vpn:
     url: "https://webvpn.hfut.edu.cn/"
