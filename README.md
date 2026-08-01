@@ -470,6 +470,11 @@ PDF fetch + base64 编码对 10MB+ 文件需要 60-120 秒。默认 timeout 需�
 - 若整批被拦，建议暂停 30-60 分钟再跑，或适当放慢速度
 - Springer/Wiley 的 PDF 路径需要 DOI URL 编码（%2F）；fetch 构造 URL 失败时会自动回退到 `window.location.href`（WebVPN 规范化后的 URL，实测可下载）
 
+> **实测补充（CPE00001）**：ScienceDirect 的拦截页还可能以 `CPE00001` 错误码出现，此时**不只是 PDF，连首页/文章页都打不开**。实测判断方法：直接访问 `https://www.sciencedirect.com/`（不走 VPN）能打开、走 WebVPN 就打不开 → 说明是 **WebVPN 出口 IP 被 SD 边缘 WAF 标记**，不是你电脑的 IP。
+> - 等待 30-60 分钟（通常会自动解除），或
+> - 改用 CARSI 模式（`auth.method: carsi`）直连出版商，完全绕开 WebVPN 出口 IP；合工大等多数高校已开通 CARSI 访问 ScienceDirect
+> - 脚本已能自动识别该拦截页并给出此提示
+
 ---
 
 ## AI 代理使用指南

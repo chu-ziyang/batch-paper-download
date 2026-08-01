@@ -535,6 +535,25 @@ class TestCarsiFailureHint(unittest.TestCase):
         self.assertIsNone(bd.carsi_failure_hint("ERR:timeout"))
 
 
+class TestScienceDirectBlockHint(unittest.TestCase):
+    """ScienceDirect CPE00001 反爬拦截页识别。"""
+
+    def test_block_page_text(self):
+        t = ("There was a problem providing the content you requested\n"
+             "Reference number: a245b05748309af4\n"
+             "CPE00001")
+        hint = bd.sciencedirect_block_hint(t)
+        self.assertIsNotNone(hint)
+        self.assertIn("CPE00001", hint)
+
+    def test_normal_article_page(self):
+        self.assertIsNone(bd.sciencedirect_block_hint(
+            "Chemosphere 2024, Volume 350, 141264\nDownload PDF"))
+
+    def test_empty_text(self):
+        self.assertIsNone(bd.sciencedirect_block_hint(""))
+
+
 class TestPdfServerPipeline(unittest.TestCase):
     """集成测试：pdf_server 落盘 + _is_valid_pdf 校验配合。
 

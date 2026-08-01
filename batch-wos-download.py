@@ -395,8 +395,8 @@ def ensure_auth(sid):
     if method == "vpn":
         return ensure_vpn(sid)
     elif method == "carsi":
-        return ensure_carsi(sid)
-    return False
+        return sid if ensure_carsi(sid) else None
+    return None
 
 # ═══════════════════════════════════════════════════
 #  CARSI 认证
@@ -495,6 +495,22 @@ def carsi_failure_hint(result):
             return "可能是 CARSI 机构权限未生效：请检查浏览器中是否已通过学校统一身份认证，并确认学校订阅了该期刊"
     if result.startswith("NOTPDF:"):
         return "返回的不是 PDF（可能是付费墙/错误页）：请确认 CARSI 登录后该文章有下载权限"
+    return None
+
+
+def sciencedirect_block_hint(text):
+    """识别 ScienceDirect CPE00001 反爬拦截页，返回可操作提示（纯函数）。
+
+    实测：WebVPN 出口 IP 被 ScienceDirect WAF 标记后，首页/文章/PDF 全部
+    返回 "There was a problem providing the content you requested"（CPE00001），
+    与脚本无关；直连（无 VPN）可正常访问，CARSI 模式可绕开。
+    """
+    t = (text or "").lower()
+    if ("there was a problem providing the content you requested" in t
+            or "cpe00001" in t):
+        return ("ScienceDirect 反爬拦截（CPE00001）：当前 WebVPN 出口 IP 被标记，"
+                "首页/文章/PDF 均无法访问。建议等待 30-60 分钟后再试，"
+                "或改用 CARSI 模式（config.yaml 中 auth.method: carsi）直连出版商")
     return None
 
 
@@ -720,10 +736,12 @@ def _is_logged_in(sid):
     return "/login" not in u and vpn_domain_core in u
 
 def ensure_vpn(sid, timeout=None):
-    """检测 VPN 登录状态，未登录则提示用户手动登录并轮询等待。
+    """检测 VPN 登录状态，未登录则用 bsk request-help 请求人工完成登录。
 
-    不依赖 bsk request-help（该命令在部分版本不弹窗）。改为点击登录
-    链接后，每 5 秒轮询当前 URL，检测到离开 /login 即视为登录成功。
+    实测结论：
+    - 停止自动化会话会关闭浏览器标签页（登录界面消失），不能用于"释放控制"；
+    - 正确做法是保持会话，用 bsk request-help 暂停自动化并在页面弹出辅助
+      面板，请求用户输入账号/密码/验证码，完成后点「继续」。
     """
     if timeout is None:
         timeout = config["auth"]["vpn"].get("timeout", 300)
@@ -735,18 +753,42 @@ def ensure_vpn(sid, timeout=None):
     bsk_nav(vpn_url, sid); time.sleep(3)
     if _is_logged_in(sid):
         print("  [OK] 已登录")
-        return True
+        return sid
 
-    # 需要登录：点击登录链接，然后轮询等待用户在浏览器完成登录
+    # 需要登录：点击登录链接（进入 CAS 表单），然后 request-help 请求人工输入
     login_link_text = config["auth"]["vpn"].get("login_link", "CAS")
-    print(f"  [!] 需要登录。请在浏览器中完成 {login_link_text} 登录（账号+密码+验证码）")
-    print(f"  [i] 等待登录完成，最长 {timeout} 秒（完成后自动继续）...")
+    print(f"  [!] 需要登录。将弹出辅助面板，请在浏览器中完成 {login_link_text} 登录"
+          f"（账号 + 密码 + 验证码），完成后点「继续」", flush=True)
     snap = bsk_snap(sid)
     login_ref = find_ref(snap, login_link_text, tag="link")
     if login_ref:
-        _bsk("click", login_ref, "--session", sid)
-        time.sleep(3)
+        try:
+            _bsk("click", login_ref, "--session", sid)
+        except Exception:
+            pass
+        time.sleep(4)
 
+    prompt = (
+        "请在浏览器中完成学校 VPN 登录：\n"
+        "1) 输入账号和密码\n"
+        "2) 点击「发送验证码」并输入收到的验证码\n"
+        "3) 点击「登录」进入 VPN 首页\n"
+        "完成后点击「继续」"
+    )
+    try:
+        _bsk("request-help", prompt, "--session", sid,
+             "--title", "VPN 登录", "--timeout", f"{timeout}s",
+             timeout=timeout + 30)
+        # 用户点击继续后，导航回 VPN 首页确认
+        bsk_nav(vpn_url, sid); time.sleep(3)
+        if _is_logged_in(sid):
+            print("\n  [OK] 检测到登录成功")
+            return sid
+        print("  [i] request-help 已结束但未检测到登录（可能未完成），继续轮询...")
+    except Exception as e:
+        print(f"  [i] request-help 不可用（{e}），改用轮询等待（保持会话）...")
+
+    # 回退：保持会话轮询（不停止会话，避免关闭标签页）
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _is_logged_in(sid):
@@ -754,12 +796,12 @@ def ensure_vpn(sid, timeout=None):
             bsk_nav(vpn_url, sid); time.sleep(3)
             if _is_logged_in(sid):
                 print(f"\n  [OK] 检测到登录成功")
-                return True
+                return sid
         remaining = int(deadline - time.time())
         print(f"  ... 等待登录（剩余 {remaining}s）", flush=True)
         time.sleep(5)
     print("\n  [!!] 登录超时，请确认 VPN 是否正常")
-    return False
+    return None
 
 # ═══════════════════════════════════════════════════
 #  VPN 前缀（出版商 → VPN 编码 URL）
@@ -1271,6 +1313,17 @@ def process_one(sid, typ, query, pub_override, out_dir):
                 time.sleep(3)
                 cur = bsk_url(sid) or ""
                 print(f"  [i] 当前页面: {cur[:90]}")
+                # ScienceDirect 反爬拦截页识别（CPE00001）：给出明确建议
+                if pub_key == "elsevier":
+                    try:
+                        txt = bsk_eval(
+                            "document.body?document.body.innerText.slice(0,1000):''",
+                            sid, timeout=15) or ""
+                        hint = sciencedirect_block_hint(txt)
+                        if hint:
+                            print(f"  [!] {hint}")
+                    except Exception:
+                        pass
 
             dl_timeout = 120 if pub_key == "acs" else 90
             if download_pdf(sid, out_path, pdf_url, eval_timeout=dl_timeout):
@@ -1443,7 +1496,8 @@ def main():
     log = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "results": []}
 
     try:
-        if not ensure_auth(sid):
+        sid = ensure_auth(sid)
+        if not sid:
             return
 
         # 启动本地 PDF 加速服务器（HTTP 模式；失败自动回退 base64）
