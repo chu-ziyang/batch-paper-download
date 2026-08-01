@@ -9,6 +9,7 @@
 """
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -391,6 +392,21 @@ class TestConfigPathOverride(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             self._fresh(bad)
         self.assertIn("配置错误", str(ctx.exception))
+
+
+class TestSkillDoc(unittest.TestCase):
+    """仓库作为可安装 skill 的打包守护：SKILL.md 必须存在且 frontmatter 完整。"""
+
+    def test_skill_md_exists_with_frontmatter(self):
+        p = HERE / "SKILL.md"
+        self.assertTrue(p.exists(), "仓库根目录缺少 SKILL.md")
+        text = p.read_text(encoding="utf-8")
+        m = re.search(r"^---\n(.*?)\n---", text, re.S | re.M)
+        self.assertIsNotNone(m, "SKILL.md 缺少 YAML frontmatter")
+        fm = dict(re.findall(r"^(\w+):\s*(.+)$", m.group(1), re.M))
+        self.assertIn("name", fm)
+        self.assertIn("description", fm)
+        self.assertTrue(fm["description"].strip(), "description 不能为空")
 
 
 class TestFindRefAny(unittest.TestCase):

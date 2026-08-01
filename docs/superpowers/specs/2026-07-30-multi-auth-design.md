@@ -15,8 +15,7 @@ batch-paper-download/
 ├── batch-wos-download.py    # Main script (reads config, no hardcoded school)
 ├── pdf_server.py            # Unchanged
 ├── config.yaml              # [NEW] User-editable config
-├── skills/
-│   └── SKILL.md             # Updated docs
+├── SKILL.md                 # Agent-facing skill doc (installable)
 └── papers_to_download.txt   # Sample input
 ```
 
@@ -37,10 +36,12 @@ auth:
 
   carsi:
     timeout: 300
+    probe: ""          # optional: subscriber-only article URL to verify access after login
 
 download:
   output_dir: "./downloads"
   skip_existing: true
+  delay: 2             # optional: seconds between papers (anti-throttling)
 ```
 
 - `auth.method` chooses the path
@@ -73,8 +74,7 @@ Per-publisher automation steps stored in `PUBLISHERS[pk]["carsi_login"]`:
 "carsi_login": {
     "entry_url": "https://www.sciencedirect.com/",
     "steps": [
-        {"click": "Sign in"},
-        {"click": "Sign in via your institution"},
+        {"click_any": ["Sign in", "Log in"]},  # multiple UI text candidates
         {"type": "{school_name}", "into": "search"},
         {"click": "{school_name}"},
     ],
@@ -88,6 +88,16 @@ Per-publisher automation steps stored in `PUBLISHERS[pk]["carsi_login"]`:
 - First visit per publisher per session: full CARSI flow
 - Subsequent visits: cookies reuse, skip auth
 - Fallback: if selector fails, prompt user to manually complete institution login
+- Login success requires evidence: URL must have left the entry page, or an
+  auth hop (IdP/wayf) must have been observed — prevents false positives when
+  the entry URL is the publisher home page (e.g. ACS)
+- On wait timeout the script re-loads the entry page once and re-checks,
+  covering the case where the user completed IdP login in another tab
+- If `auth.carsi.probe` is set, the script opens that article page after login
+  and warns when paywall markers are detected; the real PDF download remains
+  the final arbiter
+- `BPD_CONFIG` env var overrides the config path (test fixtures, multi-school
+  switching, CI)
 
 ## Code Changes Summary
 
@@ -111,12 +121,14 @@ Per-publisher automation steps stored in `PUBLISHERS[pk]["carsi_login"]`:
 | `config.yaml` parse error | Catch exception, report line |
 | CARSI selector not found | Fallback: navigate to publisher, prompt manual login |
 | CARSI login timeout | Same as VPN: report timeout, suggest checking IdP |
+| CARSI login in another tab | Re-load entry page after timeout and re-check URL/probe |
+| Paywall still shown after login | `auth.carsi.probe` warning; download failure prints CARSI hint |
 | Publisher lacks `carsi_login` | Error: "publisher not supported in CARSI mode, use VPN" |
 | Multiple school IdPs | Default: search by `school.name`; advanced: set `carsi.idp_entity_id` in config |
 
 ## Unchanged
 
-- `pdf_server.py` — zero changes
+- `pdf_server.py` — now requires `PDF_SERVER_TOKEN` to start (security default)
 - Input parsing, search logic, chunked base64 transfer, PDF magic validation — all unchanged
 - `BROWSER` constant — still in code (or optionally moved to config)
 
