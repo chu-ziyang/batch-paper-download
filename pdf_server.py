@@ -6,8 +6,8 @@
 - 路径遍历防护：os.path.basename + URL 解码后规范化
 - 调试日志默认关闭，PDF_SERVER_DEBUG=1 时才写 _debug.log（避免无限增长）
 - 端口可经 PDF_SERVER_PORT 环境变量覆盖（默认 9999）
-- 鉴权：设置 PDF_SERVER_TOKEN 后，POST 必须携带相同 X-Auth-Token，
-  否则返回 403 —— 防止陌生网页向本机写入任意文件
+- 鉴权：必须设置 PDF_SERVER_TOKEN，POST 必须携带相同 X-Auth-Token，
+  否则返回 403 —— 防止陌生网页向本机写入任意文件（未设置 token 拒绝启动）
 """
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import sys, os, urllib.parse
@@ -15,8 +15,13 @@ import sys, os, urllib.parse
 DIR = sys.argv[1] if len(sys.argv) > 1 else "."
 PORT = int(os.environ.get("PDF_SERVER_PORT", "9999"))
 DEBUG = os.environ.get("PDF_SERVER_DEBUG") == "1"
-# 鉴权 token：设置后必须匹配，未设置则保持向后兼容（不鉴权）
-TOKEN = os.environ.get("PDF_SERVER_TOKEN", "")
+# 鉴权 token：必须设置（安全默认），否则拒绝启动
+TOKEN = os.environ.get("PDF_SERVER_TOKEN", "").strip()
+if not TOKEN:
+    sys.exit(
+        "PDF_SERVER_TOKEN 未设置。出于安全考虑（防止任意网页向本机写入文件），"
+        "pdf_server 现在要求必须设置鉴权 token。\n"
+        "示例: PDF_SERVER_TOKEN=<随机字符串> py pdf_server.py <输出目录>")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -65,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Auth-Token')
 
     def do_POST(self):
-        if TOKEN and self.headers.get('X-Auth-Token', '') != TOKEN:
+        if self.headers.get('X-Auth-Token', '') != TOKEN:
             self.send_response(403)
             self.send_header('Content-Type', 'text/plain')
             self._cors_headers()

@@ -459,11 +459,13 @@ class TestPdfServerPipeline(unittest.TestCase):
     会被 _is_valid_pdf 正确识别为无效，不再被永久跳过。
     """
     PORT = "19999"  # 避开默认 9999，防止与正在运行的服务冲突
+    TOKEN = "pipeline-test-token"
 
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp(prefix="pdftest_")
-        env = dict(os.environ, PDF_SERVER_PORT=cls.PORT, PDF_SERVER_DEBUG="1")
+        env = dict(os.environ, PDF_SERVER_PORT=cls.PORT, PDF_SERVER_DEBUG="1",
+                   PDF_SERVER_TOKEN=cls.TOKEN)
         cls.proc = subprocess.Popen(
             [sys.executable, str(HERE / "pdf_server.py"), cls.tmpdir],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -490,11 +492,19 @@ class TestPdfServerPipeline(unittest.TestCase):
                 continue
         raise RuntimeError("pdf_server 未在 5s 内就绪")
 
-    def _post(self, fname, data):
+    def _post(self, fname, data, token=TOKEN):
         url = f"http://127.0.0.1:{self.PORT}/{urllib.parse.quote(fname)}"
-        req = urllib.request.Request(url, data=data, method="POST")
+        headers = {"X-Auth-Token": token} if token else {}
+        req = urllib.request.Request(url, data=data, method="POST", headers=headers)
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.read()
+
+    def test_without_token_rejected(self):
+        data = b"%PDF-1.4\n" + b"\x00" * 60000
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._post("no_token.pdf", data, token=None)
+        self.assertEqual(ctx.exception.code, 403)
+        self.assertFalse((Path(self.tmpdir) / "no_token.pdf").exists())
 
     def test_valid_pdf_roundtrip(self):
         data = b"%PDF-1.4\n" + b"\x00" * 60000
@@ -583,6 +593,20 @@ class TestPdfServerTokenAuth(unittest.TestCase):
         data = b"%PDF-1.4\n" + b"\x00" * 60000
         self.assertEqual(self._post("with_token.pdf", data, token=self.TOKEN), b"OK")
         self.assertTrue((Path(self.tmpdir) / "with_token.pdf").exists())
+
+
+class TestPdfServerRequiresTokenByDefault(unittest.TestCase):
+    """无 PDF_SERVER_TOKEN 时拒绝启动（安全默认，防止任意网页写本机文件）。"""
+
+    def test_start_without_token_fails(self):
+        tmpdir = tempfile.mkdtemp(prefix="pdfnotoken_")
+        env = dict(os.environ, PDF_SERVER_PORT="20001")
+        env.pop("PDF_SERVER_TOKEN", None)
+        r = subprocess.run(
+            [sys.executable, str(HERE / "pdf_server.py"), tmpdir],
+            env=env, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("PDF_SERVER_TOKEN", r.stderr)
 
 
 if __name__ == "__main__":
