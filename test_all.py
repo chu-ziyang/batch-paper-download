@@ -554,6 +554,24 @@ class TestScienceDirectBlockHint(unittest.TestCase):
         self.assertIsNone(bd.sciencedirect_block_hint(""))
 
 
+class TestIdpConsentHint(unittest.TestCase):
+    """学校 IdP 信息发布确认页识别（CARSI 登录中间页）。"""
+
+    def test_consent_page(self):
+        t = ("信息发布\n您将要访问此服务：Elsevier\n"
+             "您是否同意每次访问此服务时都共享这些信息？")
+        hint = bd.idp_consent_hint(t)
+        self.assertIsNotNone(hint)
+        self.assertIn("接受", hint)
+
+    def test_normal_page(self):
+        self.assertIsNone(bd.idp_consent_hint(
+            "ScienceDirect search results\nDownload PDF"))
+
+    def test_empty_text(self):
+        self.assertIsNone(bd.idp_consent_hint(""))
+
+
 class TestPdfServerPipeline(unittest.TestCase):
     """集成测试：pdf_server 落盘 + _is_valid_pdf 校验配合。
 

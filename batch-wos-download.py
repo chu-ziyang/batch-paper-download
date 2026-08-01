@@ -514,6 +514,19 @@ def sciencedirect_block_hint(text):
     return None
 
 
+def idp_consent_hint(text):
+    """识别学校 IdP 的信息发布确认页（CARSI 登录中间页），返回操作提示（纯函数）。
+
+    实测（合工大 IdP）：CARSI 登录中途会弹出"信息发布"确认页，
+    需要点击「接受」完成属性共享授权，之后才跳回出版商。
+    """
+    t = (text or "").lower()
+    if "是否同意" in t or ("信息发布" in t and "接受" in t):
+        return ("学校 IdP 信息发布确认页：请在浏览器中点击「接受」完成授权"
+                "（之后会自动跳回出版商）")
+    return None
+
+
 def probe_access(sid, pub_key, probe_url=""):
     """CARSI 登录成功后，若配置了探针 URL（一篇本校订阅的文章页），验证权限。
 
@@ -687,12 +700,25 @@ def carsi_authenticate(sid, pub_key):
     # seen_auth_hop：是否观察到 URL 离开过出版商域（去过 IdP/登录页）。
     # 对入口=首页的出版商（ACS 等），必须有跳转证据才能判定登录成功。
     seen_auth_hop = False
+    consent_hint_printed = False
     deadline = time.time() + carsi_timeout
     while time.time() < deadline:
         try:
             url = (bsk_url(sid) or "").lower()
         except Exception:
             url = ""
+        # 学校 IdP 信息发布确认页：提示用户点击「接受」
+        if url and "idp." in url and not consent_hint_printed:
+            try:
+                txt = bsk_eval(
+                    "document.body?document.body.innerText.slice(0,800):''",
+                    sid, timeout=10) or ""
+                hint = idp_consent_hint(txt)
+                if hint:
+                    print(f"\n  [!] {hint}", flush=True)
+                    consent_hint_printed = True
+            except Exception:
+                pass
         if url:
             cond_contains = (success_cond.get("url_contains") or "").lower()
             if (url.rstrip("/") != entry_url.lower().rstrip("/")

@@ -56,6 +56,7 @@ description: 通过学校 VPN 或 CARSI + 浏览器自动化，从六大出版�
 | `py` 报错 exit 49 | 使用 `py` 而不是 `python` |
 | 403 / 400 | 出版商限流：暂停 30-60 分钟，或调大 `download.delay` |
 | ScienceDirect "There was a problem..."（CPE00001） | WebVPN 出口 IP 被 SD 标记：等待或改用 CARSI 模式直连 |
+| CARSI 登录卡在 IdP"信息发布"确认页 | 点「接受」完成授权（脚本会提示），之后自动跳回出版商 |
 | 下载到空包/错误页 | 脚本自动重试并校验；检查 VPN/CARSI 权限 |
 
 ## 修改与测试
