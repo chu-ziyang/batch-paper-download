@@ -59,7 +59,8 @@ auth:
     timeout: 300
 
   carsi:
-    timeout: 300
+    timeout: 300               # 等待手动登录超时（秒）
+    probe: ""                  # 可选：本校订阅的一篇论文页 URL，登录后自动验证权限
 
 vpn_prefixes: {}                  # 可选，已知 VPN 前缀（加速启动）
 
@@ -161,8 +162,8 @@ PUBLISHERS = {
         "carsi_login": {
             "entry_url": "https://pubs.acs.org/",
             "steps": [
-                {"click": "Log in"},
-                {"click": "your institution"},
+                {"click_any": ["Find my institution", "Log in"]},
+                {"click_any": ["China CERNET Federation", "CARSI Federation", "CERNET"]},
                 {"type": "{school_name}"},
                 {"select": "{school_name}"},
             ],
@@ -182,8 +183,9 @@ PUBLISHERS = {
         "carsi_login": {
             "entry_url": "https://link.springer.com/",
             "steps": [
-                {"click": "Log in"},
-                {"click": "institution"},
+                {"click_any": ["Sign up / Log in", "Log in"]},
+                {"click_any": ["Log in via Shibboleth or Athens", "Log in via Shibboleth", "Shibboleth"]},
+                {"click": "Select your institution"},
                 {"type": "{school_name}"},
                 {"select": "{school_name}"},
             ],
@@ -203,7 +205,7 @@ PUBLISHERS = {
         "carsi_login": {
             "entry_url": "https://onlinelibrary.wiley.com/",
             "steps": [
-                {"click": "Login"},
+                {"click_any": ["Login / Register", "Login", "Log in"]},
                 {"click": "Institutional"},
                 {"type": "{school_name}"},
                 {"select": "{school_name}"},
@@ -224,8 +226,9 @@ PUBLISHERS = {
         "carsi_login": {
             "entry_url": "https://pubs.rsc.org/",
             "steps": [
-                {"click": "Log in"},
-                {"click": "institution"},
+                {"click_any": ["Log in", "Login"]},
+                {"click_any": ["Find my institution", "Log in via your home institution", "institution"]},
+                {"click_any": ["China CERNET Federation", "CARSI Federation", "CERNET"]},
                 {"type": "{school_name}"},
                 {"select": "{school_name}"},
             ],
@@ -245,8 +248,9 @@ PUBLISHERS = {
         "carsi_login": {
             "entry_url": "https://www.tandfonline.com/",
             "steps": [
-                {"click": "Log in"},
-                {"click": "Institution"},
+                {"click_any": ["Log in", "Login"]},
+                {"click": "Log in via your institution"},
+                {"click_any": ["Shibboleth", "China CERNET Federation", "CERNET"]},
                 {"type": "{school_name}"},
                 {"select": "{school_name}"},
             ],
@@ -312,6 +316,17 @@ def find_ref(snap, text, tag=None):
         ref, role, name = m.group(1), m.group(2), m.group(3)
         if tag and role != tag: continue
         if t in name.lower(): return ref
+    return None
+
+
+def find_ref_any(snap, texts):
+    """按候选文本顺序查找第一个匹配元素（支持 click_any 多候选）。"""
+    for t in texts or []:
+        if not t:
+            continue
+        ref = find_ref(snap, t)
+        if ref:
+            return ref
     return None
 
 # ═══════════════════════════════════════════════════
@@ -392,6 +407,93 @@ def _dismiss_cookie_banner(sid):
         pass
 
 
+def carsi_login_done(url, success_cond, entry_url="", seen_auth_hop=False):
+    """CARSI 登录成功判定（纯函数，便于测试）。
+
+    - url 必须在出版商域（url_contains）
+    - url 不能停留在登录/IdP 中间页（url_not_contains）
+    - 若从未观察到认证跳转（seen_auth_hop=False），还要求 URL 已离开入口页
+      （防止入口就是出版商首页时，未登录状态被误判为成功）
+    """
+    if not url:
+        return False
+    u = url.lower()
+    cond = success_cond or {}
+    url_contains = (cond.get("url_contains") or "").lower()
+    url_not = [x.lower() for x in cond.get("url_not_contains", [])]
+    if url_contains and url_contains not in u:
+        return False
+    if any(x in u for x in url_not):
+        return False
+    if not seen_auth_hop and entry_url and u == entry_url.lower():
+        return False
+    return True
+
+
+# 权限探针通用标记（启发式，只用于提示不阻塞下载）
+ACCESS_PROBE_ALLOW = ["download pdf"]
+ACCESS_PROBE_DENY = [
+    "get access", "purchase", "buy this article", "subscribe",
+    "access denied", "pay per view", "no access", "access options",
+    "获取访问", "购买", "订阅", "无权限", "机构登录",
+]
+
+
+def access_probe_verdict(text, allow_markers, deny_markers):
+    """根据文章页文本判断权限状态：allowed / denied / unknown（纯函数）。"""
+    t = (text or "").lower()
+    for m in deny_markers or []:
+        if m and m.lower() in t:
+            return "denied"
+    for m in allow_markers or []:
+        if m and m.lower() in t:
+            return "allowed"
+    return "unknown"
+
+
+def carsi_failure_hint(result):
+    """把下载失败结果映射为 CARSI 权限提示；无关问题返回 None（纯函数）。"""
+    if not result:
+        return None
+    if result.startswith("ERR:HTTP"):
+        status = result[len("ERR:HTTP"):].strip()
+        if status in ("401", "403"):
+            return "可能是 CARSI 机构权限未生效：请检查浏览器中是否已通过学校统一身份认证，并确认学校订阅了该期刊"
+    if result.startswith("NOTPDF:"):
+        return "返回的不是 PDF（可能是付费墙/错误页）：请确认 CARSI 登录后该文章有下载权限"
+    return None
+
+
+def probe_access(sid, pub_key, probe_url=""):
+    """CARSI 登录成功后，若配置了探针 URL（一篇本校订阅的文章页），验证权限。
+
+    只输出提示/警告，不阻塞下载——最终以实际 PDF 下载结果为准。
+    """
+    if not probe_url:
+        return None
+    pub = PUBLISHERS[pub_key]
+    print(f"  [->] 权限探针: {pub['name']}")
+    try:
+        bsk_nav(probe_url, sid, timeout=45)
+    except Exception:
+        print("  [i] 探针页面导航未完全加载，继续...")
+    time.sleep(5)
+    try:
+        text = bsk_eval(
+            "(function(){return document.body?document.body.innerText.slice(0,8000):'';})()",
+            sid, timeout=20) or ""
+    except Exception:
+        text = ""
+    verdict = access_probe_verdict(text, ACCESS_PROBE_ALLOW, ACCESS_PROBE_DENY)
+    if verdict == "denied":
+        print("  [!] 探针提示: 文章页显示付费/无权限标记，请确认机构订阅（仍会尝试下载）")
+    elif verdict == "allowed":
+        print("  [i] 探针提示: 文章页显示可下载标记，权限正常")
+    else:
+        print("  [i] 探针提示: 无法判定权限状态（页面无明确标记）")
+    return verdict
+
+
 def carsi_authenticate(sid, pub_key):
     """对指定出版商执行 CARSI 机构登录。
 
@@ -438,10 +540,14 @@ def carsi_authenticate(sid, pub_key):
     # Step 2: 执行自动化步骤（点击 / 输入）
     steps = carsi_cfg.get("steps", [])
     for s in steps:
-        text = s.get("click", "").replace("{school_name}", school_name)
-        if text:
+        # click_any 支持多个候选文本，按顺序尝试（出版商 UI 文案会变）
+        texts = list(s.get("click_any") or [])
+        if not texts and s.get("click"):
+            texts = [s["click"]]
+        if texts:
+            texts = [t.replace("{school_name}", school_name) for t in texts]
             snap = bsk_snap(sid)
-            ref = find_ref(snap, text)
+            ref = find_ref_any(snap, texts)
             if ref:
                 try:
                     _bsk("click", ref, "--session", sid)
@@ -449,7 +555,7 @@ def carsi_authenticate(sid, pub_key):
                     pass
                 time.sleep(3)
             else:
-                print(f"  [i] 未找到按钮 '{text[:40]}'，尝试继续...")
+                print(f"  [i] 未找到按钮（尝试: {', '.join(t[:40] for t in texts)}），继续...")
 
         if "type" in s:
             type_text = s["type"].replace("{school_name}", school_name)
@@ -501,32 +607,62 @@ def carsi_authenticate(sid, pub_key):
         post_steps_url = ""
     if post_steps_url == entry_url:
         print(f"  [i] 自动化步骤未能跳转，请在浏览器中手动完成机构登录")
-        print(f"  [i] （点击 Sign in → Institutional login → 选择学校）")
+        print(f"  [i] （如: Log in / Sign in → Institutional / Find my institution → 选择学校）")
 
     print(f"  [i] 等待登录完成...")
-    success_cond = carsi_cfg.get("success", {})
-    url_contains = success_cond.get("url_contains", pub["domain"])
-    url_not = success_cond.get("url_not_contains", ["/login", "/shibboleth", "wayf.", "idp."])
+    success_cond = {
+        "url_contains": carsi_cfg.get("success", {}).get("url_contains", pub["domain"]),
+        "url_not_contains": carsi_cfg.get("success", {}).get(
+            "url_not_contains", ["/login", "/shibboleth", "wayf.", "idp."]),
+    }
+    probe_url = config.get("auth", {}).get("carsi", {}).get("probe", "")
 
+    # seen_auth_hop：是否观察到 URL 离开过出版商域（去过 IdP/登录页）。
+    # 对入口=首页的出版商（ACS 等），必须有跳转证据才能判定登录成功。
+    seen_auth_hop = False
     deadline = time.time() + carsi_timeout
     while time.time() < deadline:
         try:
             url = (bsk_url(sid) or "").lower()
         except Exception:
             url = ""
-        # 必须满足：1) 在出版商域 2) 不在登录/认证中间页 3) URL 已变化
-        ok = (url_contains in url and
-              not any(x in url for x in url_not) and
-              url != entry_url)
-        if ok:
+        if url:
+            cond_contains = (success_cond.get("url_contains") or "").lower()
+            if url != entry_url.lower() or (cond_contains and cond_contains not in url):
+                seen_auth_hop = True
+        if carsi_login_done(url, success_cond, entry_url, seen_auth_hop):
             _carsi_authed.add(pub_key)
             print(f"\n  [OK] {pub['name']} CARSI 认证成功")
+            probe_access(sid, pub_key, probe_url)
             return True
         remaining = int(deadline - time.time())
         print(f"  ... 等待登录（剩余 {remaining}s）     ", end="\r")
         time.sleep(5)
 
-    print(f"\n  [!!] {pub['name']} CARSI 登录超时")
+    # 超时兜底：用户可能在其它标签页完成了 IdP 登录（cookie 已写入）。
+    # 重新加载入口页/出版商首页，用页面状态做最后一次检查。
+    print(f"\n  [!] 登录等待超时，重新加载入口页做最后检查...")
+    try:
+        bsk_nav(entry, sid, timeout=30)
+    except Exception:
+        pass
+    time.sleep(4)
+    try:
+        url = (bsk_url(sid) or "").lower()
+    except Exception:
+        url = ""
+    # 重检不再要求 URL 离开入口：cookies 已在其它标签页生效时，
+    # Elsevier 式入口会自动重定向回主页，首页式入口则靠探针确认。
+    if carsi_login_done(url, success_cond, "", seen_auth_hop=True):
+        _carsi_authed.add(pub_key)
+        print(f"  [OK] {pub['name']} CARSI 认证成功（重检）")
+        probe_access(sid, pub_key, probe_url)
+        return True
+
+    print(f"  [!!] {pub['name']} CARSI 登录超时")
+    if probe_url:
+        print(f"  [i] 提示: 可设置 auth.carsi.probe 为学校订阅的一篇文章页 URL，"
+              f"重检时若页面无权限标记可自动判定成功")
     return False
 
 # ═══════════════════════════════════════════════════
@@ -973,9 +1109,15 @@ def download_pdf(sid, out_path, pdf_url=None, eval_timeout=90):
         return False
     if r.startswith("ERR:HTTP"):
         print(f"  [!] fetch 返回 HTTP 错误: {r[9:]}")
+        hint = carsi_failure_hint(r)
+        if hint and config.get("auth", {}).get("method") == "carsi":
+            print(f"  [!] {hint}")
         return False
     if r.startswith("NOTPDF:"):
         print(f"  [!] 非 PDF 内容: {r[8:]}")
+        hint = carsi_failure_hint(r)
+        if hint and config.get("auth", {}).get("method") == "carsi":
+            print(f"  [!] {hint}")
         return False
     if not r.startswith("OK:"):
         print(f"  [!] PDF fetch 异常: {r[:80]}")

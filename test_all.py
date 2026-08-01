@@ -174,6 +174,124 @@ class TestFindRef(unittest.TestCase):
         self.assertEqual(bd.find_ref(self.SNAP, "cas"), "@e1")
 
 
+class TestFindRefAny(unittest.TestCase):
+    SNAP = ('@e1 button "Log in"\n'
+            '@e2 link "Find my institution"\n'
+            '@e3 link "Log in via Shibboleth or Athens"')
+
+    def test_first_candidate_match(self):
+        self.assertEqual(bd.find_ref_any(self.SNAP, ["Log in", "Find my institution"]), "@e1")
+
+    def test_second_candidate_match(self):
+        self.assertEqual(bd.find_ref_any(self.SNAP, ["Register", "Find my institution"]), "@e2")
+
+    def test_none_match(self):
+        self.assertIsNone(bd.find_ref_any(self.SNAP, ["Register", "Subscribe"]))
+
+    def test_empty_list(self):
+        self.assertIsNone(bd.find_ref_any(self.SNAP, []))
+
+
+class TestCarsiLoginDone(unittest.TestCase):
+    """CARSI 登录成功判定（纯函数）。"""
+    COND = {
+        "url_contains": "sciencedirect.com",
+        "url_not_contains": ["/login", "/shibboleth", "wayf.", "idp."],
+    }
+
+    def test_happy_path(self):
+        # 入口是机构登录页，登录后回到主页且 URL 已变化 → 成功
+        self.assertTrue(bd.carsi_login_done(
+            "https://www.sciencedirect.com/", self.COND,
+            "https://www.sciencedirect.com/user/institution/login?targetURL=%2F"))
+
+    def test_still_on_login_page(self):
+        self.assertFalse(bd.carsi_login_done(
+            "https://www.sciencedirect.com/login", self.COND, "entry"))
+
+    def test_on_idp_domain(self):
+        self.assertFalse(bd.carsi_login_done(
+            "https://idp.hfut.edu.cn/auth", self.COND, "entry"))
+
+    def test_url_unchanged_from_entry(self):
+        entry = "https://www.sciencedirect.com/user/institution/login?targetURL=%2F"
+        self.assertFalse(bd.carsi_login_done(entry, self.COND, entry))
+
+    def test_home_page_entry_without_auth_hop(self):
+        # 入口就是出版商首页（ACS 模式）：URL 没离开过首页 → 不能判定登录
+        entry = "https://pubs.acs.org/"
+        acs_cond = {"url_contains": "pubs.acs.org",
+                    "url_not_contains": ["/login", "/shibboleth", "wayf.", "idp."]}
+        self.assertFalse(bd.carsi_login_done(entry, acs_cond, entry))
+
+    def test_home_page_entry_with_auth_hop(self):
+        # 发生过认证跳转（去过 IdP）后回到首页 → 判定成功
+        entry = "https://pubs.acs.org/"
+        acs_cond = {"url_contains": "pubs.acs.org",
+                    "url_not_contains": ["/login", "/shibboleth", "wayf.", "idp."]}
+        self.assertTrue(bd.carsi_login_done(
+            entry, acs_cond, entry, seen_auth_hop=True))
+
+    def test_hop_tracked_when_url_left_publisher(self):
+        self.assertTrue(bd.carsi_login_done(
+            "https://idp.hfut.edu.cn/auth", self.COND, "entry", seen_auth_hop=True) is False)
+
+    def test_case_insensitive(self):
+        self.assertTrue(bd.carsi_login_done(
+            "HTTPS://WWW.SCIENCEDIRECT.COM/", self.COND, "entry"))
+
+    def test_progress_without_not_cond(self):
+        # 无 url_not_contains 时，只要 URL 已离开入口页即可判定
+        cond = {"url_contains": "sciencedirect.com"}
+        self.assertTrue(bd.carsi_login_done(
+            "https://www.sciencedirect.com/login", cond, "entry"))
+
+
+class TestAccessProbeVerdict(unittest.TestCase):
+    ALLOW = ["download pdf", "pdf"]
+    DENY = ["get access", "purchase", "access denied", "no access"]
+
+    def test_allow_marker(self):
+        self.assertEqual(
+            bd.access_probe_verdict("Article content ... Download PDF", self.ALLOW, self.DENY),
+            "allowed")
+
+    def test_deny_marker(self):
+        self.assertEqual(
+            bd.access_probe_verdict("Get access to this article", self.ALLOW, self.DENY),
+            "denied")
+
+    def test_deny_takes_priority(self):
+        self.assertEqual(
+            bd.access_probe_verdict("Get access ... Download PDF", self.ALLOW, self.DENY),
+            "denied")
+
+    def test_unknown(self):
+        self.assertEqual(
+            bd.access_probe_verdict("Something completely different", self.ALLOW, self.DENY),
+            "unknown")
+
+    def test_empty_text(self):
+        self.assertEqual(bd.access_probe_verdict("", self.ALLOW, self.DENY), "unknown")
+
+
+class TestCarsiFailureHint(unittest.TestCase):
+    def test_http_403_hint(self):
+        self.assertIsNotNone(bd.carsi_failure_hint("ERR:HTTP 403"))
+
+    def test_http_401_hint(self):
+        self.assertIsNotNone(bd.carsi_failure_hint("ERR:HTTP 401"))
+
+    def test_http_500_no_hint(self):
+        self.assertIsNone(bd.carsi_failure_hint("ERR:HTTP 500"))
+
+    def test_notpdf_hint(self):
+        self.assertIsNotNone(bd.carsi_failure_hint("NOTPDF:text/html"))
+
+    def test_other_no_hint(self):
+        self.assertIsNone(bd.carsi_failure_hint("ERR:timeout"))
+
+
 class TestPdfServerPipeline(unittest.TestCase):
     """集成测试：pdf_server 落盘 + _is_valid_pdf 校验配合。
 
