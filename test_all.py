@@ -174,6 +174,85 @@ class TestFindRef(unittest.TestCase):
         self.assertEqual(bd.find_ref(self.SNAP, "cas"), "@e1")
 
 
+class TestValidateConfig(unittest.TestCase):
+    """config.yaml 递归校验（纯函数）。"""
+
+    def _vpn_cfg(self, **overrides):
+        cfg = {
+            "browser": "abc123",
+            "school": {"name": "测试大学", "english_name": "Test University"},
+            "auth": {"method": "vpn",
+                     "vpn": {"url": "https://webvpn.test.edu.cn/",
+                             "login_link": "CAS", "timeout": 300}},
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def _carsi_cfg(self, **overrides):
+        cfg = {
+            "browser": "abc123",
+            "school": {"name": "测试大学", "english_name": "Test University"},
+            "auth": {"method": "carsi", "carsi": {"timeout": 300, "probe": ""}},
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def test_valid_vpn(self):
+        self.assertIsNone(bd.validate_config(self._vpn_cfg()))
+
+    def test_valid_carsi(self):
+        self.assertIsNone(bd.validate_config(self._carsi_cfg()))
+
+    def test_none_config(self):
+        self.assertIsNotNone(bd.validate_config(None))
+
+    def test_missing_browser(self):
+        cfg = self._vpn_cfg()
+        del cfg["browser"]
+        self.assertIn("browser", bd.validate_config(cfg))
+
+    def test_empty_browser(self):
+        cfg = self._vpn_cfg(browser="")
+        self.assertIn("browser", bd.validate_config(cfg))
+
+    def test_school_not_dict(self):
+        cfg = self._vpn_cfg(school="合肥工业大学")
+        self.assertIn("school", bd.validate_config(cfg))
+
+    def test_auth_not_dict(self):
+        cfg = self._vpn_cfg(auth="vpn")
+        self.assertIn("auth", bd.validate_config(cfg))
+
+    def test_bad_method(self):
+        cfg = self._vpn_cfg()
+        cfg["auth"]["method"] = "socks5"
+        self.assertIn("vpn", bd.validate_config(cfg))
+
+    def test_vpn_missing_url(self):
+        cfg = self._vpn_cfg()
+        del cfg["auth"]["vpn"]["url"]
+        self.assertIn("auth.vpn.url", bd.validate_config(cfg))
+
+    def test_vpn_url_empty(self):
+        cfg = self._vpn_cfg()
+        cfg["auth"]["vpn"]["url"] = ""
+        self.assertIn("auth.vpn.url", bd.validate_config(cfg))
+
+    def test_carsi_missing_carsi_key(self):
+        cfg = self._carsi_cfg()
+        del cfg["auth"]["carsi"]
+        self.assertIn("auth.carsi", bd.validate_config(cfg))
+
+    def test_carsi_missing_english_name(self):
+        cfg = self._carsi_cfg()
+        del cfg["school"]["english_name"]
+        self.assertIn("english_name", bd.validate_config(cfg))
+
+    def test_vpn_mode_allows_minimal_school(self):
+        cfg = self._vpn_cfg(school={})
+        self.assertIsNone(bd.validate_config(cfg))
+
+
 class TestFindRefAny(unittest.TestCase):
     SNAP = ('@e1 button "Log in"\n'
             '@e2 link "Find my institution"\n'

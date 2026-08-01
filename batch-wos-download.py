@@ -69,6 +69,48 @@ download:
   skip_existing: true          # 已存在有效 PDF 时跳过
 """
 
+
+def validate_config(cfg):
+    """递归校验配置结构，返回错误信息字符串；通过返回 None（纯函数）。"""
+    if not isinstance(cfg, dict):
+        return f"config.yaml 应为字典（YAML 映射），当前是 {type(cfg).__name__}"
+
+    for key in ("browser", "school", "auth"):
+        if key not in cfg:
+            return f"缺少必填字段: {key}"
+
+    if not isinstance(cfg["browser"], str) or not cfg["browser"].strip():
+        return "browser 应为非空字符串（bsk browsers 第一列 ID）"
+
+    if not isinstance(cfg["school"], dict):
+        return ("school 应为字典格式，例如:\n"
+                '  school:\n    name: "合肥工业大学"\n'
+                '    english_name: "Hefei University of Technology"')
+
+    if not isinstance(cfg["auth"], dict):
+        return ("auth 应为字典格式，不能是字符串。\n"
+                "  正确: auth:\n    method: vpn\n"
+                "  错误: auth: vpn")
+
+    method = cfg["auth"].get("method", "vpn")
+    if method not in ("vpn", "carsi"):
+        return f"auth.method 必须是 vpn 或 carsi，当前: {method}"
+
+    if method == "vpn":
+        vpn_cfg = cfg["auth"].get("vpn")
+        if not isinstance(vpn_cfg, dict) or not vpn_cfg.get("url"):
+            return "VPN 模式下 auth.vpn.url 不能为空，请填写学校 VPN 地址"
+    else:
+        carsi_cfg = cfg["auth"].get("carsi")
+        if not isinstance(carsi_cfg, dict):
+            return "CARSI 模式下需要 auth.carsi 配置（至少包含 timeout），请参考生成的模板"
+        school = cfg["school"]
+        if not school.get("english_name"):
+            return ("CARSI 模式下 school.english_name 不能为空"
+                    "（用于在出版商机构列表中搜索学校）")
+    return None
+
+
 def load_config():
     """加载 config.yaml，不存在则生成模板并退出。"""
     if not CONFIG_PATH.exists():
@@ -83,30 +125,9 @@ def load_config():
     except yaml.YAMLError as e:
         sys.exit(f"[!!] config.yaml 格式错误: {e}")
 
-    if cfg is None:
-        sys.exit("[!!] config.yaml 为空，请填入配置后重新运行")
-
-    # 校验必填字段
-    required = ["browser", "school", "auth"]
-    missing = [k for k in required if k not in cfg]
-    if missing:
-        sys.exit(f"[!!] config.yaml 缺少必填字段: {', '.join(missing)}")
-
-    # 校验 auth 为 dict 类型
-    auth_cfg = cfg.get("auth", {})
-    if not isinstance(auth_cfg, dict):
-        sys.exit("[!!] config.yaml 中 auth 应为字典格式，不能是字符串。\n"
-                 "  正确: auth:\n    method: vpn\n  错误: auth: vpn")
-
-    method = auth_cfg.get("method", "vpn")
-    if method not in ("vpn", "carsi"):
-        sys.exit(f"[!!] auth.method 必须是 vpn 或 carsi，当前: {method}")
-
-    # 校验 VPN 模式必填子字段
-    if method == "vpn":
-        vpn_cfg = auth_cfg.get("vpn", {})
-        if not vpn_cfg.get("url"):
-            sys.exit("[!!] VPN 模式下 auth.vpn.url 不能为空，请在 config.yaml 中填写学校 VPN 地址")
+    err = validate_config(cfg)
+    if err:
+        sys.exit(f"[!!] config.yaml 配置错误: {err}")
 
     return cfg
 
